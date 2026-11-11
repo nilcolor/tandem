@@ -96,11 +96,14 @@ def session_path(dir_name):
 
 def load_session(dir_name):
     """session.json of `dir_name`, or None when the session doesn't exist."""
+    path = os.path.join(session_path(dir_name), "session.json")
     try:
-        with open(os.path.join(session_path(dir_name), "session.json"), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        raise TandemError("cannot read %s: %s" % (path, exc))
 
 
 def save_session(meta):
@@ -282,3 +285,131 @@ def run_init(args):
     )
     print(session_path(meta["dir"]))
     return 0
+
+
+def short_name(dir_name):
+    """The part of a session dir name the user types: `<repo>--<short>` → `<short>`."""
+    # Sanitized slugs never contain "--", so the first one is the separator.
+    return dir_name.split("--", 1)[1] if "--" in dir_name else dir_name
+
+
+def all_sessions():
+    """Every readable session.json under the spool, sorted by dir name."""
+    try:
+        names = sorted(os.listdir(paths.sessions_dir()))
+    except FileNotFoundError:
+        return []
+    found = []
+    for dir_name in names:
+        try:
+            meta = load_session(dir_name)
+        except TandemError:
+            continue
+        if meta is not None:
+            found.append(meta)
+    return found
+
+
+def active_sessions():
+    return [m for m in all_sessions() if is_active(m)]
+
+
+def _toplevel_or_none(cwd):
+    try:
+        return repo_toplevel(cwd)
+    except TandemError:
+        return None
+
+
+def _describe(meta):
+    return "%s (%s)" % (meta["dir"], meta.get("repo") or "?")
+
+
+def _pick(matches, name):
+    if len(matches) == 1:
+        return matches[0]
+    active = [m for m in matches if is_active(m)]
+    if len(active) == 1:
+        return active[0]
+    listed = active or matches
+    raise TandemError(
+        "session name %r is ambiguous; use the full dir name: %s"
+        % (name, ", ".join(_describe(m) for m in listed))
+    )
+
+
+def _by_name(name, top):
+    if name and "/" not in name and name not in (".", ".."):
+        meta = load_session(name)
+        if meta is not None:
+            return meta
+    short = sanitize(name)
+    if not short:
+        raise TandemError("no session named %r" % name)
+    sessions = [m for m in all_sessions() if short_name(m["dir"]) == short]
+    if top is not None:
+        local = [m for m in sessions if m.get("repo") == top]
+        if local:
+            return _pick(local, name)
+    if not sessions:
+        raise TandemError("no session named %r" % name)
+    return _pick(sessions, name)
+
+
+def resolve_session(explicit=None, cwd=None):
+    """The session a command acts on, as its session.json dict.
+
+    First match wins: `--session`, `TANDEM_SESSION`, the repo pointer (active
+    sessions only), the only active session on the machine (outside a repo),
+    else an error. Steps 1 and 2 return ended sessions too: the caller decides
+    whether an ended session is an error, because hooks and watchers must exit
+    quietly on one rather than fail.
+    """
+    top = _toplevel_or_none(cwd or os.getcwd())
+    if explicit:
+        return _by_name(explicit, top)
+
+    env_dir = os.environ.get("TANDEM_SESSION")
+    if env_dir:
+        # Falling through to the pointer here would silently attach a launched
+        # harness to some other session; a dangling TANDEM_SESSION is a bug.
+        meta = load_session(env_dir) if "/" not in env_dir else None
+        if meta is None:
+            raise TandemError("TANDEM_SESSION names no session: %s" % env_dir)
+        return meta
+
+    stale = None
+    if top is not None:
+        pointed = read_pointer(top)
+        if pointed:
+            meta = load_session(pointed)
+            if is_active(meta):
+                return meta
+            stale = "%s (%s)" % (pointed, "ended" if meta else "missing")
+
+    active = active_sessions()
+    # Inside a repo the repo's own session is the only acceptable answer:
+    # handing a launcher another repo's session (or the main checkout's, in a
+    # worktree) would put two trees under one plan.
+    if top is None and len(active) == 1:
+        return active[0]
+
+    lines = []
+    if top is None:
+        if active:
+            lines.append("not inside a git repository and %d active sessions" % len(active))
+        else:
+            lines.append("not inside a git repository and no active session; run `tandem init` in a repo")
+    else:
+        lines.append("no active session for %s; run `tandem init`" % top)
+    if stale:
+        lines.append("stale repo pointer: %s" % stale)
+    if active:
+        lines.append("active sessions (pick one with --session):")
+        lines.extend("  " + _describe(m) for m in active)
+    raise TandemError("\n".join(lines))
+
+
+def resolve_args(args):
+    """`resolve_session` for a parsed command line (uses the global `--session`)."""
+    return resolve_session(getattr(args, "session", None))

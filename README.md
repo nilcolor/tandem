@@ -77,6 +77,11 @@ Resolution order, first match wins:
 | 5 | otherwise: error listing the active sessions | ambiguity is never guessed |
 
 - **Worktrees** have different toplevels, so parallel tasks in worktrees get separate sessions for free.
+- Step 4 applies only outside a git repo. Inside a repo (or a worktree) without its own active session,
+  taking the machine's only session would attach a launcher to another tree's plan, so it is an error.
+- Steps 1 and 2 return an ended session too; each command decides whether that is an error (hooks and
+  watchers exit quietly on one). A `--session` short name matches the current repo's sessions first,
+  then all sessions; among several matches, the single active one wins.
 - **One active session per checkout.** `tandem init` refuses while one is active unless `--replace`:
   one working tree can't take two drivers anyway.
 - **Ending.** `tandem done` writes the summary and clears the repo pointer. A stale pointer (a session
