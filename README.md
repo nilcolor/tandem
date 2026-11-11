@@ -186,6 +186,14 @@ opens panes: the user runs each launcher in whatever terminal they like.
   are namespaced `<plugin>:<skill>`). Checked with print-mode `/hooks`, `/skills` and `/plugin list`
   (no model turn), and for rules with marker words agy reported from context, with no tool calls in
   the event stream. Nothing is installed globally and nothing is written into the target repo.
+- **What `tandem agy` writes** (`tandem/launch_agy.py`): `.agents/hooks.json` with one hook name,
+  `tandem`, holding `PreToolUse` (a `run_command` matcher group), `SessionStart`, `PreInvocation` and
+  `Stop`, each calling `'<shim>' --session <dir> hook agy-…`; `.agents/rules/AGENTS.md`, the rendered
+  protocol for agy's role (refused if over agy's 24 KB rules cap); and `peers/agy/profile.json`, one
+  of three profiles (see [Decision](#decision)). The test prefixes come from `session.json`
+  `test_cmds` with whitespace collapsed; one containing `(` or `)` is left out of the rules, since it
+  would end the rule early, but the hook still matches it. Generated hooks.json and all three
+  profiles were loaded with print-mode `/hooks` and `/config` on 1.5.5 (no model turn).
 - Consequence: `tandem …` commands must run outside the sandbox, the same as tests. The sandbox
   blocks reads outside the workspace, and `tandem` needs the shim and package from its checkout plus
   `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox too. The hook
@@ -428,7 +436,8 @@ user's own config stays untouched.
   `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
   `command(dip rspec)`, never `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
   tandem checks at startup that a bypass rule still works and switches to this profile if it doesn't.
-- **Driver profile (when agy drives)**: `--mode auto` plus the tandem and git allowlist, no sandbox
+- **Driver profile (when agy drives)**: `--mode auto` plus the tandem and git allowlist
+  (`command(tandem)`, `command(git)`, `toolPermission: request-review`, `deny: []`), no sandbox
   (the driver needs network and the full toolchain; on 1.5.4 the sandbox also made the workspace
   read-only). Prompts are left only
   for irreversible actions, which the user wants to see anyway.
@@ -607,6 +616,9 @@ All with print-mode slash commands (`num_turns: 0`), so no model turn was spent.
   --output-format json` shows all three keys as written, `-p=/permissions` lists the rules at global
   scope, and the log line `CLI settings initialized: permissions=&{Allow:[unsandboxed(go test) …]}`
   appears. The fallback and driver profiles load the same way.
+- **An empty `deny: []` replaces the global deny; an omitted `deny` keeps it** (`-p=/config`: the
+  global `command(rm -rf)` stays with no key and disappears with `[]`). The driver profile writes
+  `deny: []`, so the profile stays the whole policy.
 - **`/config` and `/permissions` echo rule strings without validating them**: a profile with
   `bogus(x)` shows `bogus(x)` too. They prove a profile parsed and replaced the global list; they
   can't prove agy honours a rule kind. A startup self-check built on `/config` alone only catches a

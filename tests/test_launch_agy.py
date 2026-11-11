@@ -1,0 +1,331 @@
+import json
+import os
+import subprocess
+from unittest import mock
+
+from tandem import TandemError, hooks, launch_agy, protocol, session
+from tests.helpers import SHIM, TandemTestCase
+
+EVENTS = {"PreToolUse", "SessionStart", "PreInvocation", "Stop"}
+ASK = {"decision": "ask"}
+BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
+
+
+def pretool_payload(command):
+    return json.dumps(
+        {
+            "conversationId": "c-1",
+            "hookEventName": "PreToolUse",
+            "cwd": "/tmp/repo",
+            "lastUserInput": "",
+            "toolCall": {"id": "t1", "name": "run_command", "args": {"CommandLine": command}},
+        }
+    )
+
+
+class AgyFilesTestCase(TandemTestCase):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo("apix")
+        with open(os.path.join(self.repo, "go.mod"), "w") as f:
+            f.write("module apix\n")
+        self.meta = session.init_session(cwd=self.repo, name="add-retry", ticket="APIX-7")
+        self.dir = self.meta["dir"]
+        self.sdir = session.session_path(self.dir)
+        os.chdir(self.repo)
+
+    def new_session(self, name, test_cmds):
+        return session.init_session(cwd=self.repo, name=name, test_cmds=test_cmds, replace=True)
+
+    def read_json(self, path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def read_text(self, path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def handler_command(self, event):
+        spec = self.read_json(launch_agy.hooks_path(self.sdir))["tandem"][event]
+        if event == "PreToolUse":
+            return spec[0]["hooks"][0]["command"]
+        return spec[0]["command"]
+
+    def run_handler(self, event, stdin):
+        """Run a generated handler the way agy does: `sh -c` from the dir holding hooks.json."""
+        return subprocess.run(
+            ["sh", "-c", self.handler_command(event)],
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            cwd=launch_agy.agents_dir(self.sdir),
+            env=dict(os.environ),
+        )
+
+
+class HooksJsonTest(AgyFilesTestCase):
+    def setUp(self):
+        super().setUp()
+        launch_agy.write_agents_dir(self.meta, "navigator")
+        self.doc = self.read_json(launch_agy.hooks_path(self.sdir))
+
+    def command(self, hook):
+        return "'%s' --session %s hook %s" % (SHIM, self.dir, hook)
+
+    def test_one_hook_name_at_top_level(self):
+        self.assertEqual(list(self.doc), ["tandem"])
+        self.assertFalse(set(self.doc) & EVENTS)
+        self.assertNotIn("hooks", self.doc)
+
+    def test_events_under_the_hook_name(self):
+        self.assertEqual(set(self.doc["tandem"]), EVENTS)
+
+    def test_pretool_is_a_run_command_group(self):
+        self.assertEqual(
+            self.doc["tandem"]["PreToolUse"],
+            [{"matcher": "run_command", "hooks": [{"type": "command", "command": self.command("agy-pretool")}]}],
+        )
+
+    def test_other_events_are_flat_handler_lists(self):
+        for event, hook in (("SessionStart", "agy-session-start"), ("PreInvocation", "agy-preinvocation"), ("Stop", "agy-stop")):
+            self.assertEqual(self.doc["tandem"][event], [{"type": "command", "command": self.command(hook)}], event)
+
+    def test_every_handler_names_a_registered_agy_hook(self):
+        for event, hook in launch_agy.HOOK_EVENTS:
+            self.assertIn(hook, hooks.HOOKS)
+            self.assertEqual(hooks.HOOKS[hook].peer, "agy")
+            self.assertTrue(self.handler_command(event).endswith(" hook " + hook))
+
+    def test_shim_is_absolute_and_single_quoted(self):
+        cmd = self.handler_command("Stop")
+        self.assertTrue(os.path.isabs(SHIM))
+        self.assertTrue(cmd.startswith("'%s' " % SHIM))
+
+    def test_same_for_both_roles(self):
+        launch_agy.write_agents_dir(self.meta, "driver")
+        self.assertEqual(self.read_json(launch_agy.hooks_path(self.sdir)), self.doc)
+
+    def test_matches_build_hooks(self):
+        self.assertEqual(self.doc, launch_agy.build_hooks(self.meta))
+
+    def test_pretool_handler_runs_under_sh(self):
+        proc = self.run_handler("PreToolUse", pretool_payload("go test ./..."))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), BYPASS)
+
+    def test_other_handlers_run_under_sh(self):
+        payloads = {
+            "SessionStart": {"conversationId": "c-1", "hookEventName": "SessionStart"},
+            "PreInvocation": {"conversationId": "c-1", "hookEventName": "PreInvocation", "lastUserInput": "hello"},
+            "Stop": {"conversationId": "c-1", "hookEventName": "Stop", "terminationReason": "ERROR"},
+        }
+        for event, payload in payloads.items():
+            proc = self.run_handler(event, json.dumps(payload))
+            self.assertEqual(proc.returncode, 0, (event, proc.stderr))
+            self.assertIsInstance(json.loads(proc.stdout), dict, event)
+        self.assertEqual(self.read_text(os.path.join(self.sdir, "peers", "agy", "conversation_id")).strip(), "c-1")
+        consoles = [r for r in session.read_log(self.sdir) if r.get("kind") == "console"]
+        self.assertEqual([(c["peer"], c["to"], c["body"]) for c in consoles], [("agy", "navigator", "hello")])
+
+
+class RulesTest(AgyFilesTestCase):
+    def test_rules_are_the_rendered_protocol(self):
+        for role in ("navigator", "driver"):
+            launch_agy.write_agents_dir(self.meta, role)
+            self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", role))
+
+    def test_navigator_rules_carry_the_watcher_command(self):
+        launch_agy.write_agents_dir(self.meta, "navigator")
+        text = self.read_text(launch_agy.rules_path(self.sdir))
+        self.assertIn("tandem watch --as navigator --detach", text)
+        self.assertIn("APIX-7", text)
+
+    def test_rules_path(self):
+        self.assertEqual(launch_agy.rules_path(self.sdir), os.path.join(self.sdir, ".agents", "rules", "AGENTS.md"))
+        self.assertEqual(launch_agy.write_agents_dir(self.meta, "navigator"), os.path.join(self.sdir, ".agents"))
+
+    def test_huge_brief_stays_under_cap(self):
+        meta = session.init_session(cwd=self.repo, name="huge", task="x" * 100000, test_cmds=["go test"] * 50, replace=True)
+        launch_agy.write_agents_dir(meta, "navigator")
+        size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"])))
+        self.assertLess(size, launch_agy.RULES_CAP)
+
+    def test_over_cap_writes_nothing(self):
+        with mock.patch.object(protocol, "render", return_value="y" * (launch_agy.RULES_CAP + 1)):
+            with self.assertRaises(TandemError) as ctx:
+                launch_agy.write_agents_dir(self.meta, "navigator")
+        self.assertIn("cap", str(ctx.exception))
+        self.assertFalse(os.path.exists(launch_agy.hooks_path(self.sdir)))
+        self.assertFalse(os.path.exists(launch_agy.rules_path(self.sdir)))
+
+    def test_unicode_counts_bytes(self):
+        text = "é" * (launch_agy.RULES_CAP // 2 + 1)
+        with mock.patch.object(protocol, "render", return_value=text):
+            with self.assertRaises(TandemError):
+                launch_agy.render_rules(self.meta, "navigator")
+
+    def test_rewrite_replaces_old_role(self):
+        launch_agy.write_agents_dir(self.meta, "driver")
+        launch_agy.write_agents_dir(self.meta, "navigator")
+        self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", "navigator"))
+        leftovers = [n for n in os.listdir(os.path.dirname(launch_agy.rules_path(self.sdir))) if n != "AGENTS.md"]
+        self.assertEqual(leftovers, [])
+
+
+class ProfileTest(AgyFilesTestCase):
+    def test_navigator(self):
+        self.assertEqual(
+            launch_agy.build_profile(self.meta, "navigator"),
+            {
+                "toolPermission": "proceed-in-sandbox",
+                "enableTerminalSandbox": True,
+                "permissions": {"allow": ["unsandboxed(go test)", "unsandboxed(tandem)"], "deny": ["write_file(*)"]},
+            },
+        )
+
+    def test_fallback(self):
+        self.assertEqual(
+            launch_agy.build_profile(self.meta, "fallback"),
+            {
+                "toolPermission": "request-review",
+                "enableTerminalSandbox": False,
+                "permissions": {
+                    "allow": [
+                        "command(tandem)",
+                        "command(git status)",
+                        "command(git diff)",
+                        "command(git log)",
+                        "command(git show)",
+                        "command(go test)",
+                    ],
+                    "deny": ["write_file(*)"],
+                },
+            },
+        )
+
+    def test_driver(self):
+        self.assertEqual(
+            launch_agy.build_profile(self.meta, "driver"),
+            {
+                "toolPermission": "request-review",
+                "enableTerminalSandbox": False,
+                "permissions": {"allow": ["command(tandem)", "command(git)"], "deny": []},
+            },
+        )
+
+    def test_every_profile_writes_allow_and_deny(self):
+        for kind in launch_agy.PROFILES:
+            path = launch_agy.write_profile(self.meta, kind)
+            perms = self.read_json(path)["permissions"]
+            self.assertEqual(set(perms), {"allow", "deny"}, kind)
+            self.assertIsInstance(perms["allow"], list)
+            self.assertIsInstance(perms["deny"], list)
+
+    def test_rule_kinds_do_not_mix(self):
+        nav = launch_agy.build_profile(self.meta, "navigator")["permissions"]["allow"]
+        self.assertTrue(all(r.startswith("unsandboxed(") for r in nav))
+        for kind in ("fallback", "driver"):
+            allow = launch_agy.build_profile(self.meta, kind)["permissions"]["allow"]
+            self.assertTrue(all(r.startswith("command(") for r in allow), kind)
+
+    def test_default_path(self):
+        path = launch_agy.write_profile(self.meta, "navigator")
+        self.assertEqual(path, os.path.join(self.sdir, "peers", "agy", "profile.json"))
+        self.assertEqual(self.read_json(path), launch_agy.build_profile(self.meta, "navigator"))
+
+    def test_custom_path(self):
+        path = os.path.join(self.tmp, "check", "navigator.json")
+        self.assertEqual(launch_agy.write_profile(self.meta, "navigator", path), path)
+        self.assertEqual(self.read_json(path)["toolPermission"], "proceed-in-sandbox")
+        self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir)))
+
+    def test_unknown_kind(self):
+        with self.assertRaises(TandemError):
+            launch_agy.build_profile(self.meta, "bogus")
+
+    def test_profile_kind(self):
+        self.assertEqual(launch_agy.profile_kind("navigator"), "navigator")
+        self.assertEqual(launch_agy.profile_kind("navigator", fallback=True), "fallback")
+        self.assertEqual(launch_agy.profile_kind("driver"), "driver")
+        self.assertEqual(launch_agy.profile_kind("driver", fallback=True), "driver")
+        with self.assertRaises(TandemError):
+            launch_agy.profile_kind("human")
+
+    def test_write_session_files(self):
+        self.assertEqual(launch_agy.write_session_files(self.meta, "navigator"), "navigator")
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["toolPermission"], "proceed-in-sandbox")
+        self.assertTrue(os.path.exists(launch_agy.hooks_path(self.sdir)))
+        self.assertTrue(os.path.exists(launch_agy.rules_path(self.sdir)))
+        self.assertEqual(launch_agy.write_session_files(self.meta, "navigator", fallback=True), "fallback")
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["toolPermission"], "request-review")
+        self.assertEqual(launch_agy.write_session_files(self.meta, "driver"), "driver")
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"], [])
+        self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", "driver"))
+
+
+class TestPrefixFlowTest(AgyFilesTestCase):
+    def setUp(self):
+        super().setUp()
+        self.meta = self.new_session("specs", ["dip rspec", "bundle exec rspec"])
+        self.dir = self.meta["dir"]
+        self.sdir = session.session_path(self.dir)
+        launch_agy.write_session_files(self.meta, "navigator")
+
+    def pretool(self, command):
+        proc = self.run_handler("PreToolUse", pretool_payload(command))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_navigator_profile_has_each_prefix(self):
+        self.assertEqual(
+            self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["allow"],
+            ["unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)", "unsandboxed(tandem)"],
+        )
+
+    def test_fallback_profile_has_exact_commands(self):
+        allow = launch_agy.build_profile(self.meta, "fallback")["permissions"]["allow"]
+        self.assertIn("command(dip rspec)", allow)
+        self.assertIn("command(bundle exec rspec)", allow)
+        self.assertNotIn("command(dip)", allow)
+        self.assertNotIn("command(bundle)", allow)
+
+    def test_hook_bypasses_the_same_prefixes(self):
+        self.assertEqual(self.pretool("dip rspec spec/models/user_spec.rb"), BYPASS)
+        self.assertEqual(self.pretool("bundle exec rspec"), BYPASS)
+        self.assertEqual(self.pretool("tandem recv"), BYPASS)
+
+    def test_hook_does_not_bypass_the_bare_tool(self):
+        self.assertEqual(self.pretool("dip run rails c"), ASK)
+        self.assertEqual(self.pretool("bundle install"), ASK)
+        self.assertEqual(self.pretool("go test ./..."), ASK)
+
+    def test_detected_prefix(self):
+        profile = launch_agy.build_profile(self.new_session("detected", None), "navigator")
+        self.assertEqual(profile["permissions"]["allow"], ["unsandboxed(go test)", "unsandboxed(tandem)"])
+
+    def test_no_test_commands(self):
+        os.remove(os.path.join(self.repo, "go.mod"))
+        meta = self.new_session("bare", None)
+        self.assertEqual(meta["test_cmds"], [])
+        self.assertEqual(launch_agy.build_profile(meta, "navigator")["permissions"]["allow"], ["unsandboxed(tandem)"])
+        self.assertEqual(
+            launch_agy.build_profile(meta, "fallback")["permissions"]["allow"],
+            ["command(tandem)", "command(git status)", "command(git diff)", "command(git log)", "command(git show)"],
+        )
+
+    def test_prefix_normalisation(self):
+        meta = dict(self.meta, test_cmds=["  go   test ", "go test", "", "   ", 7, None, "make (all)", "tandem", "make test"])
+        self.assertEqual(launch_agy.rule_prefixes(meta), ["go test", "tandem", "make test"])
+        self.assertEqual(
+            launch_agy.build_profile(meta, "navigator")["permissions"]["allow"],
+            ["unsandboxed(go test)", "unsandboxed(tandem)", "unsandboxed(make test)"],
+        )
+        self.assertEqual(launch_agy.build_profile(dict(meta, test_cmds=None), "navigator")["permissions"]["allow"], ["unsandboxed(tandem)"])
+
+    def test_hook_reads_session_json_at_call_time(self):
+        meta = session.load_session(self.dir)
+        meta["test_cmds"] = ["make check"]
+        session.save_session(meta)
+        self.assertEqual(self.pretool("make check"), BYPASS)
+        self.assertEqual(self.pretool("dip rspec"), ASK)
