@@ -5,15 +5,26 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
-from tandem import cli, paths
+from tandem import cli, paths, session
 
 SHIM = paths.shim_path()
 
 # Variables a launched harness exports; a test inheriting them from the
 # developer's own tandem session would resolve that session instead of its own.
 _CLEARED_ENV = ("TANDEM_SESSION", "TANDEM_ROLE", "TANDEM_HOME")
+
+
+class FakeExec:
+    """Stands in for `session.exec_harness`: records each (argv, env, cwd) instead of exec'ing."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, env, cwd):
+        self.calls.append((argv, env, cwd))
 
 
 class TandemTestCase(unittest.TestCase):
@@ -102,3 +113,26 @@ class TandemTestCase(unittest.TestCase):
             cwd=cwd,
             env=dict(os.environ),
         )
+
+    def events(self, name):
+        """`name` events in `self.sdir`'s log, oldest first."""
+        return [r for r in session.read_log(self.sdir) if r.get("kind") == "event" and r.get("event") == name]
+
+    def mark_ended(self, dir_name=None):
+        """End a session by editing session.json, without `tandem done`'s summary or pointer cleanup."""
+        meta = session.load_session(dir_name or self.dir)
+        meta["ended"] = "2026-11-11T12:00:00Z"
+        session.save_session(meta)
+
+    def dead_pid(self):
+        """A pid that just exited, so nothing runs under it."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def wait_for(self, cond, timeout=10.0, interval=0.01):
+        end = time.monotonic() + timeout
+        while not cond():
+            if time.monotonic() > end:
+                self.fail("condition not met within %ss" % timeout)
+            time.sleep(interval)

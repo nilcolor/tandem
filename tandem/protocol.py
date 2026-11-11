@@ -1,7 +1,7 @@
 import os
 import re
 
-from tandem import TandemError, session, watch
+from tandem import TandemError, maildir, session, watch
 
 TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "protocol.md")
 PEERS = {"claude": "Claude Code", "agy": "agy"}
@@ -14,6 +14,8 @@ TASK_CAP = 6000
 AGENT_COMMANDS = ("tandem send", "tandem recv", "tandem status", "tandem log", "tandem watch")
 # The driver closes the session once the user has confirmed in its console.
 DRIVER_COMMANDS = AGENT_COMMANDS + ("tandem done",)
+# The launcher's initial prompt carries this prefix so the prompt hooks don't log it as human input.
+LAUNCHER_PREFIX = "tandem:"
 
 _MARKER = re.compile(r"^<!-- tandem: (shared|role [a-z]+|peer [a-z]+) -->$")
 _PLACEHOLDER = re.compile(r"\{\{([a-z_]+)\}\}")
@@ -42,7 +44,7 @@ def peer_role(meta, peer):
     role = session.role_of(meta, peer)
     if role is not None:
         return role
-    raise TandemError("%s holds no role in session %s" % (peer, meta.get("dir")))
+    raise TandemError("%s holds no role in session %s" % (peer, meta["dir"]))
 
 
 def _other(role):
@@ -71,6 +73,16 @@ def first_turn(role):
     return "then wait for the driver's plan: if there was no mail, say so and end your turn"
 
 
+def initial_prompt(meta, role, before_recv=""):
+    """A launcher's initial prompt; `before_recv` is a sentence the harness acts on before reading mail."""
+    parts = ["%s session `%s` is up and you are the %s." % (LAUNCHER_PREFIX, session.display_name(meta), role)]
+    if before_recv:
+        parts.append(before_recv)
+    recv = "Then run" if before_recv else "Run"
+    parts.append("%s `tandem recv` until it says no mail, %s." % (recv, first_turn(role)))
+    return " ".join(parts)
+
+
 def _brief(meta, sdir):
     ticket = (meta.get("ticket") or "").strip()
     task = (meta.get("task") or "").strip()
@@ -91,11 +103,21 @@ def _brief(meta, sdir):
     return "\n\n".join(parts)
 
 
+def _code_list(words):
+    return ", ".join("`%s`" % w for w in words)
+
+
+def _reply_types():
+    """The types that expect a reply by default, in TYPES order: "`a`, `b` and `c`"."""
+    words = ["`%s`" % t for t in maildir.TYPES if t in maildir.EXPECTS_REPLY]
+    return "%s and %s" % (", ".join(words[:-1]), words[-1])
+
+
 def _tests(meta):
     cmds = meta["test_cmds"]
     if not cmds:
         return "none configured; find the repo's own (README, Makefile) and tell your peer which you use."
-    return ", ".join("`%s`" % c for c in cmds)
+    return _code_list(cmds)
 
 
 def values(meta, peer, role):
@@ -103,16 +125,20 @@ def values(meta, peer, role):
     other = _other(role)
     other_peer = meta["roles"][other]
     return {
-        "session": meta.get("name") or session.short_name(meta["dir"]),
+        "session": session.display_name(meta),
         "session_dir": sdir,
         "role": role,
         "peer": PEERS[peer],
         "other_role": other,
-        "other_peer": PEERS.get(other_peer, other_peer),
+        "other_peer": PEERS[other_peer],
         "brief": _brief(meta, sdir),
         "tests": _tests(meta),
         "doorbell": watch.doorbell(role),
         "watch_cmd": watch.detach_command(role),
+        "launcher_prefix": LAUNCHER_PREFIX,
+        "types": _code_list(maildir.TYPES),
+        "reply_types": _reply_types(),
+        "no_mail_exit": str(maildir.NO_MAIL),
     }
 
 

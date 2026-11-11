@@ -1,11 +1,9 @@
 import json
 import os
 import shutil
-import subprocess
-import sys
 from unittest import mock
 
-from tandem import hooks, launch_agy, maildir, session, watch
+from tandem import hooks, launch_agy, maildir, protocol, session, watch
 from tests.helpers import TandemTestCase
 
 CONV = "ec33ebf9-0cba-4100-8142-c61503f6c587"
@@ -88,11 +86,6 @@ class AgyHookTestCase(TandemTestCase):
 
     def send(self, to="navigator", body="please review", sender="driver"):
         return maildir.deliver(self.meta, maildir.build_envelope(sender, to, body))
-
-    def dead_pid(self):
-        proc = subprocess.Popen([sys.executable, "-c", "pass"])
-        proc.wait()
-        return proc.pid
 
     def write_watcher(self, role="navigator", pid=None, ls_address=LS, raw=None):
         os.makedirs(os.path.join(self.sdir, "peers", role), exist_ok=True)
@@ -461,7 +454,7 @@ class PreInvocationTest(AgyHookTestCase):
         self.assertEqual(self.consoles(), [])
 
     def test_launcher_prompt_skipped(self):
-        self.invoke(hooks.LAUNCHER_PREFIX + " you are the navigator; run tandem recv")
+        self.invoke(protocol.LAUNCHER_PREFIX + " you are the navigator; run tandem recv")
         self.assertEqual(self.consoles(), [])
 
     def test_same_text_after_a_doorbell_is_logged_again(self):

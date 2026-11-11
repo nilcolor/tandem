@@ -6,14 +6,21 @@ from collections import namedtuple
 
 from tandem import TandemError, cmdline, maildir, protocol, session, watch
 
-# `safe` is what the hook prints when anything goes wrong; None prints nothing.
-# A hook must never break the harness's loop, so every failure ends in `safe`
-# and exit 0.
-Hook = namedtuple("Hook", "name peer run safe")
+# `event` is the harness event the hook is configured for. `safe` is what the hook prints when
+# anything goes wrong; None prints nothing. A hook must never break the harness's loop, so every
+# failure ends in `safe` and exit 0.
+Hook = namedtuple("Hook", "name peer event run safe")
 
-# The launcher's initial prompt carries this prefix so it isn't logged as human input.
-LAUNCHER_PREFIX = "tandem:"
 ERROR_CAP = 500
+ASK = {"decision": "ask"}
+BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
+NOOP = {}
+# A watcher that fails to start would otherwise make every idle Stop re-enter
+# the loop to retry it.
+WATCHDOG_BACKOFF = 60.0
+# A module global rather than a parameter: hooks run from `tandem hook` through the CLI, so
+# there is no caller to inject a clock, and tests patch this instead.
+_clock = time.time
 
 
 class HookInputError(TandemError):
@@ -45,7 +52,7 @@ def hooks_log_path(sdir, peer):
 def note_failure(sdir, name, peer, exc):
     """One line in `peers/<peer>/hooks.log`, or stderr when no session was found."""
     line = "%s %s: %s: %s" % (
-        session.iso(session._now()),
+        session.now_iso(),
         name,
         type(exc).__name__,
         str(exc).replace("\n", " ")[:ERROR_CAP],
@@ -78,7 +85,7 @@ def log_console(meta, peer, body):
             return False
         record = {
             "kind": "console",
-            "ts": session.iso(session._now()),
+            "ts": session.now_iso(),
             "from": "human",
             "to": protocol.peer_role(current, peer),
             "peer": peer,
@@ -94,52 +101,32 @@ def claude_prompt(meta, payload):
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         raise HookInputError("no prompt string in stdin")
-    if not prompt.strip() or prompt.startswith(LAUNCHER_PREFIX):
+    if not prompt.strip() or prompt.startswith(protocol.LAUNCHER_PREFIX):
         return None
     log_console(meta, "claude", prompt)
     return None
-
-
-ASK = {"decision": "ask"}
-BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
-NOOP = {}
-DOORBELL_PREFIX = "tandem doorbell"
-# A watcher that fails to start would otherwise make every idle Stop re-enter
-# the loop to retry it.
-WATCHDOG_BACKOFF = 60.0
-_clock = time.time
 
 
 def _agy_file(sdir, name):
     return os.path.join(session.peer_dir(sdir, "agy"), name)
 
 
-def _read_text(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def record_conversation(sdir, payload, hook_name):
+def record_conversation(sdir, payload):
     """Keep `peers/agy/conversation_id` current, so the watcher rings the conversation agy is on.
 
-    A failure here is logged, not raised: the hook's own decision matters more.
+    `run_hook` calls it before every agy hook, since each payload carries the id; an OSError
+    there is logged, not raised, because the hook's own decision matters more.
     """
     conv = payload.get("conversationId")
     if not isinstance(conv, str) or not conv.strip():
         return
     conv = conv.strip()
     path = watch.conversation_path(sdir)
-    current = _read_text(path)
+    current = session.read_text(path)
     if current is not None and current.strip() == conv:
         return
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        session.write_text_atomic(path, conv + "\n")
-    except OSError as exc:
-        note_failure(sdir, hook_name, "agy", exc)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    session.write_text_atomic(path, conv + "\n")
 
 
 def sandboxed(sdir):
@@ -178,7 +165,6 @@ def agy_pretool(meta, payload):
     Never returns `{}`, which agy reads as deny.
     """
     sdir = session.session_path(meta["dir"])
-    record_conversation(sdir, payload, "agy-pretool")
     call = payload.get("toolCall")
     if not isinstance(call, dict):
         raise HookInputError("no toolCall object in stdin")
@@ -208,7 +194,7 @@ def _system_message(lines):
 
 
 def _watchdog_due(sdir):
-    text = _read_text(_agy_file(sdir, "watchdog"))
+    text = session.read_text(_agy_file(sdir, "watchdog"))
     try:
         last = float(text) if text else None
     except ValueError:
@@ -233,7 +219,6 @@ def _claim_unrung(sdir, role):
 
 def agy_session_start(meta, payload):
     sdir = session.session_path(meta["dir"])
-    record_conversation(sdir, payload, "agy-session-start")
     if not session.is_active(meta):
         return NOOP
     role = protocol.peer_role(meta, "agy")
@@ -241,7 +226,7 @@ def agy_session_start(meta, payload):
     if not watch.agy_watcher_alive(sdir, role, os.environ):
         lines.append("Your tandem watcher is not running. Start it now by running exactly: %s" % watch.detach_command(role))
         _mark_watchdog(sdir)
-    pending = maildir.pending_counts(sdir).get(role, 0)
+    pending = maildir.pending_counts(sdir)[role]
     if pending:
         lines.append("%d message(s) pending: run `tandem recv` until it says no mail." % pending)
         # Told here, so the watcher doesn't ring for the same mail.
@@ -256,7 +241,6 @@ def agy_preinvocation(meta, payload):
     so the last input seen is kept in `peers/agy/last_input`.
     """
     sdir = session.session_path(meta["dir"])
-    record_conversation(sdir, payload, "agy-preinvocation")
     if not session.is_active(meta):
         return NOOP
     text = payload.get("lastUserInput")
@@ -267,10 +251,10 @@ def agy_preinvocation(meta, payload):
     if not text.strip():
         return NOOP
     path = _agy_file(sdir, "last_input")
-    if _read_text(path) == text:
+    if session.read_text(path) == text:
         return NOOP
     head = text.lstrip()
-    if not (head.startswith(DOORBELL_PREFIX) or head.startswith(LAUNCHER_PREFIX)):
+    if not (head.startswith(watch.DOORBELL_PREFIX) or head.startswith(protocol.LAUNCHER_PREFIX)):
         log_console(meta, "agy", text)
     # Written after logging: a failed log is retried on the next model call.
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -281,7 +265,6 @@ def agy_preinvocation(meta, payload):
 def agy_stop(meta, payload):
     """Stop: when agy goes idle, restart a dead watcher and pick up mail no ring announced."""
     sdir = session.session_path(meta["dir"])
-    record_conversation(sdir, payload, "agy-stop")
     if not session.is_active(meta):
         return NOOP
     if payload.get("terminationReason") != "NO_TOOL_CALL" or payload.get("fullyIdle") is not True:
@@ -304,11 +287,11 @@ def agy_stop(meta, payload):
 HOOKS = {
     hook.name: hook
     for hook in (
-        Hook("claude-prompt", "claude", claude_prompt, None),
-        Hook("agy-pretool", "agy", agy_pretool, ASK),
-        Hook("agy-session-start", "agy", agy_session_start, NOOP),
-        Hook("agy-preinvocation", "agy", agy_preinvocation, NOOP),
-        Hook("agy-stop", "agy", agy_stop, NOOP),
+        Hook("claude-prompt", "claude", "UserPromptSubmit", claude_prompt, None),
+        Hook("agy-pretool", "agy", "PreToolUse", agy_pretool, ASK),
+        Hook("agy-session-start", "agy", "SessionStart", agy_session_start, NOOP),
+        Hook("agy-preinvocation", "agy", "PreInvocation", agy_preinvocation, NOOP),
+        Hook("agy-stop", "agy", "Stop", agy_stop, NOOP),
     )
 }
 
@@ -333,7 +316,13 @@ def run_hook(args):
         raw = read_stdin()
         meta = session.resolve_args(args)
         sdir = session.session_path(meta["dir"])
-        output = hook.run(meta, parse_payload(raw))
+        payload = parse_payload(raw)
+        if hook.peer == "agy":
+            try:
+                record_conversation(sdir, payload)
+            except OSError as exc:
+                note_failure(sdir, hook.name, hook.peer, exc)
+        output = hook.run(meta, payload)
     except Exception as exc:
         note_failure(sdir, hook.name, hook.peer, exc)
         output = hook.safe

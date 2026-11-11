@@ -1,7 +1,7 @@
 import os
 import re
 
-from tandem import TandemError, protocol, session, watch
+from tandem import TandemError, maildir, protocol, session, watch
 from tests.helpers import TandemTestCase
 
 LIMIT = 16 * 1024
@@ -190,6 +190,25 @@ class RenderTest(ProtocolTestCase):
             used = set(re.findall(r"\{\{([a-z_]+)\}\}", f.read()))
         self.assertTrue(used)
         self.assertLessEqual(used, set(protocol.values(self.meta, "claude", "driver")))
+
+
+class CodeValuesTest(ProtocolTestCase):
+    def test_message_types_and_reply_defaults_come_from_maildir(self):
+        text = protocol.render(self.meta, "claude")
+        self.assertIn("- Types: %s." % ", ".join("`%s`" % t for t in maildir.TYPES), text)
+        replying = [t for t in maildir.TYPES if t in maildir.EXPECTS_REPLY]
+        self.assertIn("%s and `%s` expect a reply." % (", ".join("`%s`" % t for t in replying[:-1]), replying[-1]), text)
+
+    def test_no_mail_exit_comes_from_maildir(self):
+        text = protocol.render(self.meta, "agy")
+        self.assertIn("`no mail` (exit %d)" % maildir.NO_MAIL, text)
+        self.assertIn("exit %d\n  means nothing came" % maildir.NO_MAIL, text)
+
+    def test_launcher_prefix_matches_the_initial_prompts(self):
+        text = protocol.render(self.meta, "claude")
+        self.assertIn("A prompt starting with `%s` comes from the tandem launcher" % protocol.LAUNCHER_PREFIX, text)
+        for role in session.PAIR_ROLES:
+            self.assertTrue(protocol.initial_prompt(self.meta, role).startswith(protocol.LAUNCHER_PREFIX))
 
 
 class MissingValuesTest(ProtocolTestCase):

@@ -39,19 +39,15 @@ def rules_path(sdir):
 
 
 def build_hooks(meta):
-    def handler(hook):
-        return {"type": "command", "command": paths.shim_command("--session", meta["dir"], "hook", hook)}
+    def entry(hook):
+        handler = {"type": "command", "command": paths.shim_command("--session", meta["dir"], "hook", hook.name)}
+        # Only run_command needs a decision, so every other tool keeps agy's own policy.
+        if hook.event == "PreToolUse":
+            return [{"matcher": "run_command", "hooks": [handler]}]
+        return [handler]
 
-    # Top-level keys are hook names; event names there load nothing, silently. Only run_command
-    # needs a decision, so every other tool keeps agy's own policy.
-    return {
-        "tandem": {
-            "PreToolUse": [{"matcher": "run_command", "hooks": [handler("agy-pretool")]}],
-            "SessionStart": [handler("agy-session-start")],
-            "PreInvocation": [handler("agy-preinvocation")],
-            "Stop": [handler("agy-stop")],
-        }
-    }
+    # Top-level keys are hook names; event names there load nothing, silently.
+    return {"tandem": {h.event: entry(h) for h in hooks.HOOKS.values() if h.peer == PEER}}
 
 
 def user_deny():
@@ -235,7 +231,7 @@ def self_check(meta):
     finally:
         shutil.rmtree(tmp, True)
     reason, definitive = parse_check(profile, result)
-    record = {"version": version, "ok": reason is None, "reason": reason or "", "ts": session.iso(session._now())}
+    record = {"version": version, "ok": reason is None, "reason": reason or "", "ts": session.now_iso()}
     if definitive:
         paths.make_private_dir(paths.tandem_home())
         session.write_json_atomic(check_path(), record)
@@ -266,11 +262,11 @@ def choose_fallback(meta, profile):
 
 
 def initial_prompt(meta, role):
-    name = meta.get("name") or session.short_name(meta["dir"])
-    return (
-        "%s session `%s` is up and you are the %s. If tandem's session message says your watcher is not "
-        "running, start it first by running exactly `%s`. Then run `tandem recv` until it says no mail, %s."
-        % (hooks.LAUNCHER_PREFIX, name, role, watch.detach_command(role), protocol.first_turn(role))
+    return protocol.initial_prompt(
+        meta,
+        role,
+        "If tandem's session message says your watcher is not running, start it first by running exactly `%s`."
+        % watch.detach_command(role),
     )
 
 

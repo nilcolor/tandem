@@ -1,13 +1,13 @@
 import argparse
 import os
 
-from tandem import hooks, paths, protocol, session
+from tandem import paths, protocol, session
 
 PEER = "claude"
 # The waiter's deadline sits just under the hook timeout so it exits 0 on its
 # own instead of being killed by Claude.
 STOP_TIMEOUT = 14400
-WAIT_DEADLINE = 14340
+WAIT_DEADLINE = STOP_TIMEOUT - 60
 # A bare tool name in deny removes the tool from Claude's context entirely.
 NAVIGATOR_DENY = ["Edit", "Write", "NotebookEdit"]
 
@@ -41,15 +41,6 @@ def build_settings(meta, role):
     }
 
 
-def initial_prompt(meta, role):
-    return "%s session `%s` is up and you are the %s. Run `tandem recv` until it says no mail, %s." % (
-        hooks.LAUNCHER_PREFIX,
-        meta.get("name") or session.short_name(meta["dir"]),
-        role,
-        protocol.first_turn(role),
-    )
-
-
 def prepare(meta, role=None, extra=()):
     """Claim the role, write the session's Claude config; returns (argv, env, cwd) to exec."""
     meta = session.claim_role(meta["dir"], PEER, role)
@@ -65,7 +56,7 @@ def prepare(meta, role=None, extra=()):
     # another option, and `--` keeps a variadic option in `extra` from eating the prompt.
     argv = ["claude", "--add-dir", sdir, "--settings", settings_path(sdir), "--append-system-prompt", text]
     argv += list(extra)
-    argv += ["--", initial_prompt(meta, role)]
+    argv += ["--", protocol.initial_prompt(meta, role)]
     return argv, session.harness_env(meta, role), meta["repo"]
 
 

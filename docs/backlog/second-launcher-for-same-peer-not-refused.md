@@ -1,6 +1,6 @@
 ---
 worth: later
-where: tandem/session.py claim_role
+where: tandem/session.py (claim_role)
 added: 2026-11-11
 ---
 # A second launcher for the same peer isn't refused

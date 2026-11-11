@@ -11,9 +11,11 @@ import unicodedata
 from tandem import TandemError, paths
 
 ROLES = ("driver", "navigator", "human")
+PAIR_ROLES = ("driver", "navigator")
 DEFAULT_ROLES = {"driver": "claude", "navigator": "agy"}
 NAME_CAP = 48
 DEFAULT_BRANCHES = ("main", "master")
+SUBJECT_CAP = 100
 
 # Order matters: it is the order the prefixes appear in profiles and prompts.
 TEST_PREFIXES = (
@@ -41,6 +43,10 @@ def iso(dt):
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def now_iso():
+    return iso(_now())
+
+
 def sanitize(text):
     # NFKD first so accented names keep their letters ("Café" → "cafe")
     # instead of losing them to the [a-z0-9] filter.
@@ -49,7 +55,7 @@ def sanitize(text):
     return slug[:NAME_CAP].rstrip("-")
 
 
-def _git(cwd, *args):
+def git(cwd, *args):
     try:
         result = subprocess.run(
             ["git", "-C", cwd] + list(args),
@@ -65,7 +71,7 @@ def _git(cwd, *args):
 
 
 def repo_toplevel(cwd=None):
-    top = _git(cwd or os.getcwd(), "rev-parse", "--show-toplevel")
+    top = git(cwd or os.getcwd(), "rev-parse", "--show-toplevel")
     if not top:
         raise TandemError("not inside a git repository")
     return os.path.realpath(top)
@@ -73,7 +79,7 @@ def repo_toplevel(cwd=None):
 
 def current_branch(top):
     """The checked-out branch's short name, or None on detached HEAD."""
-    return _git(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
+    return git(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
 
 
 def _repo_slug(top):
@@ -111,7 +117,13 @@ def peer_dir(sdir, name):
 
 
 def load_session(dir_name):
-    """session.json of `dir_name`, or None when the session doesn't exist."""
+    """session.json of `dir_name`, or None when the session doesn't exist.
+
+    A name that isn't a plain entry of the spool (empty, `.`, `..`, anything with `/`) names no
+    session, so no caller can read outside it.
+    """
+    if not dir_name or "/" in dir_name or dir_name in (".", ".."):
+        return None
     path = os.path.join(session_path(dir_name), "session.json")
     try:
         with open(path, encoding="utf-8") as f:
@@ -128,6 +140,47 @@ def save_session(meta):
 
 def is_active(meta):
     return meta is not None and meta.get("ended") is None
+
+
+def session_state(dir_name):
+    """(session.json or None, why it isn't active: "ended", "missing", "unreadable", or None).
+
+    One classification for a repo pointer (`init`, resolution, `status`) and for waiting loops.
+    """
+    try:
+        meta = load_session(dir_name)
+    except TandemError:
+        return None, "unreadable"
+    if meta is None:
+        return None, "missing"
+    return meta, None if is_active(meta) else "ended"
+
+
+def still_active(dir_name):
+    """Whether a loop waiting on `dir_name` should keep waiting.
+
+    An unreadable session.json ends the wait like an ended one: `deliver` refuses it too, so
+    nothing more can arrive. It is replaced atomically, so this is never a half-written file.
+    """
+    return session_state(dir_name)[1] is None
+
+
+def display_name(meta):
+    """The session name as the user typed it, or the short name for a session without one."""
+    return meta.get("name") or short_name(meta["dir"])
+
+
+def read_text(path):
+    """The file's text, or None when it is missing or can't be read as UTF-8."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_stripped(path):
+    return (read_text(path) or "").strip() or None
 
 
 def write_text_atomic(path, text):
@@ -148,11 +201,7 @@ def repo_pointer_dir(top):
 
 def read_pointer(top):
     """The session dir name the repo's pointer names, or None."""
-    try:
-        with open(os.path.join(repo_pointer_dir(top), "current"), encoding="utf-8") as f:
-            return f.read().strip() or None
-    except FileNotFoundError:
-        return None
+    return _read_stripped(os.path.join(repo_pointer_dir(top), "current"))
 
 
 def write_pointer(top, dir_name):
@@ -176,14 +225,6 @@ def clear_pointer(top, dir_name):
         os.rmdir(pdir)
     except OSError:
         pass
-
-
-def _read_stripped(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
 
 
 def repo_pointers():
@@ -220,7 +261,7 @@ def write_log_line(sdir, record):
 
 
 def event_record(event, ts=None, **fields):
-    record = {"kind": "event", "ts": ts or iso(_now()), "event": event}
+    record = {"kind": "event", "ts": ts or now_iso(), "event": event}
     record.update(fields)
     return record
 
@@ -319,14 +360,6 @@ def _create_tree(sdir):
         open(os.path.join(sdir, name), "a").close()
 
 
-def _load_or_none(dir_name):
-    """session.json of `dir_name`, or None when it is missing or unreadable (a stale pointer)."""
-    try:
-        return load_session(dir_name) if "/" not in dir_name else None
-    except TandemError:
-        return None
-
-
 def _normalise_test_cmds(cmds):
     """Whitespace collapsed, in order, once each: every reader then uses the list as stored."""
     out = [" ".join(c.split()) for c in cmds]
@@ -341,8 +374,8 @@ def _end_replaced(old_dir, new_dir, now):
     Re-read under its own lock, like `end_session`, so a claim or `done` racing this isn't lost.
     """
     with locked(session_path(old_dir)):
-        old = _load_or_none(old_dir)
-        if not is_active(old):
+        old, why = session_state(old_dir)
+        if why is not None:
             return None
         old["ended"] = iso(now)
         old["replaced_by"] = new_dir
@@ -355,8 +388,8 @@ def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, re
     """Create a session for the repo containing `cwd`; returns its session.json dict."""
     top = repo_toplevel(cwd)
     old_dir = read_pointer(top)
-    old = _load_or_none(old_dir) if old_dir else None
-    if is_active(old) and not replace:
+    old_active = session_state(old_dir)[1] is None
+    if old_active and not replace:
         raise TandemError(
             "repo already has an active session %s (end it with `tandem done` or pass --replace)" % old_dir
         )
@@ -384,7 +417,7 @@ def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, re
     }
     save_session(meta)
 
-    replaced = _end_replaced(old_dir, dir_name, now) if is_active(old) else None
+    replaced = _end_replaced(old_dir, dir_name, now) if old_active else None
 
     write_pointer(top, dir_name)
     extra = {"replaces": replaced} if replaced else {}
@@ -486,10 +519,9 @@ def _pick(matches, name):
 
 
 def _by_name(name, top):
-    if name and "/" not in name and name not in (".", ".."):
-        meta = load_session(name)
-        if meta is not None:
-            return meta
+    meta = load_session(name)
+    if meta is not None:
+        return meta
     short = sanitize(name)
     if not short:
         raise TandemError("no session named %r" % name)
@@ -520,7 +552,7 @@ def resolve_session(explicit=None, cwd=None):
     if env_dir:
         # Falling through to the pointer here would silently attach a launched
         # harness to some other session; a dangling TANDEM_SESSION is a bug.
-        meta = load_session(env_dir) if "/" not in env_dir else None
+        meta = load_session(env_dir)
         if meta is None:
             raise TandemError("TANDEM_SESSION names no session: %s" % env_dir)
         return meta
@@ -529,12 +561,8 @@ def resolve_session(explicit=None, cwd=None):
     if top is not None:
         pointed = read_pointer(top)
         if pointed:
-            try:
-                meta = load_session(pointed) if "/" not in pointed else None
-                why = "ended" if meta else "missing"
-            except TandemError:
-                meta, why = None, "unreadable"
-            if is_active(meta):
+            meta, why = session_state(pointed)
+            if why is None:
                 return meta
             stale = "%s (%s)" % (pointed, why)
 
@@ -564,9 +592,6 @@ def resolve_session(explicit=None, cwd=None):
 def resolve_args(args):
     """`resolve_session` for a parsed command line (uses the global `--session`)."""
     return resolve_session(getattr(args, "session", None))
-
-
-SUBJECT_CAP = 100
 
 
 def _subject(body):
@@ -656,7 +681,7 @@ def end_session(meta):
             raise TandemError("session %s no longer exists" % meta["dir"])
         if not is_active(current):
             raise TandemError("session %s already ended at %s" % (meta["dir"], current["ended"]))
-        current["ended"] = iso(_now())
+        current["ended"] = now_iso()
         summary = os.path.join(sdir, "summary.md")
         write_text_atomic(summary, build_summary(sdir, current))
         save_session(current)
@@ -670,9 +695,6 @@ def run_done(args):
     meta = end_session(resolve_args(args))
     print(os.path.join(session_path(meta["dir"]), "summary.md"))
     return 0
-
-
-PAIR_ROLES = ("driver", "navigator")
 
 
 def role_of(meta, peer):
@@ -733,7 +755,7 @@ def claim_role(dir_name, peer, role=None, pid=None):
             if held is not None:
                 roles[held] = holder
         claims = dict(meta.get("claims") or {})
-        claims[peer] = {"role": role, "pid": pid, "ts": iso(_now())}
+        claims[peer] = {"role": role, "pid": pid, "ts": now_iso()}
         meta["roles"] = roles
         meta["claims"] = claims
         save_session(meta)

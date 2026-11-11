@@ -43,21 +43,11 @@ class SessionTestCase(TandemTestCase):
         self.assertEqual(out, "")
         return err
 
-    def mark_ended(self, dir_name=None):
-        meta = session.load_session(dir_name or self.dir)
-        meta["ended"] = "2026-11-11T12:00:00Z"
-        session.save_session(meta)
-
     def write_pidfile(self, role, text, sdir=None):
         path = session.watcher_pidfile(sdir or self.sdir, role)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(text)
-
-    def dead_pid(self):
-        proc = subprocess.Popen([sys.executable, "-c", "pass"])
-        proc.wait()
-        return proc.pid
 
 
 class LogRenderTest(SessionTestCase):
@@ -146,14 +136,6 @@ class LogFollowTest(SessionTestCase):
         thread.start()
         return thread, seen
 
-    def wait_for(self, predicate, timeout=5):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if predicate():
-                return
-            time.sleep(0.01)
-        self.fail("condition not met within %ss" % timeout)
-
     def test_follow_sees_appends_and_stops_at_done(self):
         thread, seen = self.follow_in_thread()
         self.wait_for(lambda: len(seen) == 1)
@@ -179,6 +161,14 @@ class LogFollowTest(SessionTestCase):
         self.mark_ended()
         thread.join(5)
         self.assertFalse(thread.is_alive())
+
+    def test_unreadable_session_json_drains_and_returns(self):
+        self.deliver("hi")
+        with open(os.path.join(self.sdir, "session.json"), "w") as f:
+            f.write("{")
+        seen = []
+        maildir.follow_log(self.meta, seen.append, follow=True, interval=0.02)
+        self.assertEqual(len(seen), 2)
 
     def test_ended_session_drains_and_returns(self):
         self.deliver("hi")

@@ -65,9 +65,9 @@ def latest_from(sdir, role):
     Unread mail is left out: an answer must point at something the user saw.
     """
     cur = maildir.inbox_path(sdir, SENDER, "cur")
-    for name in reversed(maildir._inbox_names(sdir, SENDER, "cur")):
+    for name in reversed(maildir.message_names(sdir, SENDER, "cur")):
         try:
-            msg = maildir._read_message(os.path.join(cur, name))
+            msg = maildir.read_message(os.path.join(cur, name))
         except TandemError:
             continue
         if isinstance(msg, dict) and msg.get("from") == role:

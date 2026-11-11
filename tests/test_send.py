@@ -46,11 +46,6 @@ class SendTestCase(TandemTestCase):
             records = [json.loads(line) for line in f]
         return [r for r in records if r["kind"] == "message"]
 
-    def end_session(self):
-        meta = session.load_session(self.dir)
-        meta["ended"] = "2026-11-11T12:00:00Z"
-        session.save_session(meta)
-
 
 class EnvelopeTest(SendTestCase):
     def test_envelope_shape(self):
@@ -264,7 +259,7 @@ class SendErrorTest(SendTestCase):
         self.assertIn("message body is empty", str(ctx.exception))
 
     def test_ended_session(self):
-        self.end_session()
+        self.mark_ended()
         os.environ["TANDEM_SESSION"] = self.dir
         err = self.send_error("--as", "driver", "--to", "navigator", "x")
         self.assertIn("has ended", err)
@@ -278,7 +273,7 @@ class SendErrorTest(SendTestCase):
 
     def test_deliver_rechecks_ended_under_the_lock(self):
         meta = session.load_session(self.dir)
-        self.end_session()
+        self.mark_ended()
         envelope = maildir.build_envelope("driver", "navigator", "x")
         with self.assertRaises(TandemError):
             maildir.deliver(meta, envelope)

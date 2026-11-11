@@ -59,11 +59,6 @@ class RecvTestCase(TandemTestCase):
         with open(path, "w") as f:
             json.dump({"id": "9999", "from": "driver", "to": role, "type": "question", "body": "guard"}, f)
 
-    def end_session(self):
-        meta = session.load_session(self.dir)
-        meta["ended"] = "2026-11-11T12:00:00Z"
-        session.save_session(meta)
-
 
 class OrderingTest(RecvTestCase):
     def test_pops_lowest_id_first(self):
@@ -144,7 +139,7 @@ class PeekPopTest(RecvTestCase):
 
     def test_ended_session_still_reads_leftover_mail(self):
         self.deliver("left over")
-        self.end_session()
+        self.mark_ended()
         code, out, err = self.run_cli("--session", self.dir, "recv", "--as", "navigator")
         self.assertEqual(code, 0, err)
         self.assertIn("left over", out)
@@ -226,7 +221,7 @@ class RoleTest(RecvTestCase):
         self.assertIn("--as must be one of", self.recv_error())
 
     def test_no_session(self):
-        self.end_session()
+        self.mark_ended()
         os.chdir(self.tmp)
         self.assertIn("no active", self.recv_error("--as", "navigator").lower())
 
@@ -276,14 +271,29 @@ class EmptyAndWaitTest(RecvTestCase):
         self.assertEqual(self.inbox("navigator"), ["0001.json"])
 
     def test_wait_on_ended_session_gives_up(self):
-        self.end_session()
+        self.mark_ended()
         start = time.monotonic()
         code, out, err = self.run_cli("--session", self.dir, "recv", "--as", "navigator", "--wait")
         self.assertEqual((code, out, err), (3, "", "no mail for navigator\n"))
         self.assertLess(time.monotonic() - start, 2)
 
+    def test_wait_stops_when_session_json_turns_unreadable(self):
+        def corrupt():
+            with open(os.path.join(self.sdir, "session.json"), "w") as f:
+                f.write("{")
+
+        timer = threading.Timer(0.3, corrupt)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        guard = threading.Timer(10, self.drop_raw_message, ("navigator",))
+        guard.start()
+        self.addCleanup(guard.cancel)
+        start = time.monotonic()
+        self.assertIsNone(maildir.receive(self.meta, "navigator", wait=True))
+        self.assertLess(time.monotonic() - start, 5)
+
     def test_wait_stops_when_session_ends(self):
-        timer = threading.Timer(0.3, self.end_session)
+        timer = threading.Timer(0.3, self.mark_ended)
         timer.start()
         self.addCleanup(timer.cancel)
         # Safety bound: a wait that missed the end picks this file up and fails the test.

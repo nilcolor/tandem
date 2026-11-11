@@ -48,8 +48,8 @@ class HumanTestCase(TandemTestCase):
 
     def inbox(self, role, sub="new"):
         sdir = self.sdir
-        names = maildir._inbox_names(sdir, role, sub)
-        return [maildir._read_message(os.path.join(maildir.inbox_path(sdir, role, sub), n)) for n in names]
+        names = maildir.message_names(sdir, role, sub)
+        return [maildir.read_message(os.path.join(maildir.inbox_path(sdir, role, sub), n)) for n in names]
 
     def end(self, **extra):
         meta = session.load_session(self.dir)

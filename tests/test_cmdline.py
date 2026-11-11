@@ -2,6 +2,7 @@ import unittest
 
 from tandem import cmdline
 from tandem.cmdline import REDIR, SEP, WORD
+from tests.helpers import TandemTestCase
 
 PREFIXES = ["go test", "dip rspec", "bundle exec rspec", "tandem send", "tandem recv", "tandem status"]
 
@@ -11,7 +12,7 @@ def words(text):
     return [v for k, v in toks if k == WORD]
 
 
-class TokensTest(unittest.TestCase):
+class TokensTest(TandemTestCase):
     def test_plain_words(self):
         self.assertEqual(cmdline.tokens("go  test\t./..."), ([(WORD, "go"), (WORD, "test"), (WORD, "./...")], False))
 
@@ -76,7 +77,7 @@ class TokensTest(unittest.TestCase):
                 cmdline.tokens(text)
 
 
-class BypassTest(unittest.TestCase):
+class BypassTest(TandemTestCase):
     def check(self, text, prefixes=PREFIXES):
         return cmdline.bypass_prefix(text, prefixes)
 
@@ -157,7 +158,7 @@ class BypassTest(unittest.TestCase):
         self.assertEqual(self.check("tandem status", ["", "tandem status"]), "tandem status")
 
 
-class WriteGateTest(unittest.TestCase):
+class WriteGateTest(TandemTestCase):
     def reason(self, text):
         return cmdline.write_reason(text)
 

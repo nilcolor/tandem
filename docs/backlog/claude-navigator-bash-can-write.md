@@ -1,5 +1,6 @@
 ---
 worth: yes
+where: tandem/launch_claude.py (build_settings)
 added: 2026-11-11
 ---
 # Claude as navigator can still write files through Bash

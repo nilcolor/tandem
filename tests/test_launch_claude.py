@@ -1,25 +1,10 @@
 import json
 import os
 import shutil
-import subprocess
 import sys
 
 from tandem import TandemError, cli, launch_claude, protocol, session
-from tests.helpers import SHIM, TandemTestCase
-
-
-def dead_pid():
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    proc.wait()
-    return proc.pid
-
-
-class FakeExec:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, argv, env, cwd):
-        self.calls.append((argv, env, cwd))
+from tests.helpers import SHIM, FakeExec, TandemTestCase
 
 
 class LaunchTestCase(TandemTestCase):
@@ -51,9 +36,6 @@ class LaunchTestCase(TandemTestCase):
     def settings(self):
         with open(launch_claude.settings_path(self.sdir), encoding="utf-8") as f:
             return json.load(f)
-
-    def events(self, name):
-        return [r for r in session.read_log(self.sdir) if r.get("kind") == "event" and r.get("event") == name]
 
     def set_claim(self, peer, role, pid):
         meta = session.load_session(self.dir)
@@ -250,7 +232,7 @@ class RoleClaimTest(LaunchTestCase):
         self.assertIn("tandem: agy is already the navigator", err)
 
     def test_dead_peer_claim_is_released(self):
-        self.set_claim("agy", "navigator", dead_pid())
+        self.set_claim("agy", "navigator", self.dead_pid())
         self.launched("claude", "--role", "navigator")
         self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "agy", "navigator": "claude"})
 

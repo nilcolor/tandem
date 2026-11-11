@@ -32,7 +32,7 @@ def inbox_path(sdir, role, sub):
     return os.path.join(sdir, "inbox", role, sub)
 
 
-def _inbox_names(sdir, role, sub):
+def message_names(sdir, role, sub):
     """Message filenames in one inbox dir, lowest id first.
 
     Sorted by number, not text: ids widen past 9999 and "10000" < "9999".
@@ -49,13 +49,22 @@ def _inbox_names(sdir, role, sub):
     return [name for _, name in sorted(found)]
 
 
+def _name_id(name):
+    return int(_MESSAGE_FILE.match(name).group(1))
+
+
+def unread_ids(sdir, role):
+    """Ids of `role`'s unread messages, lowest first."""
+    return [_name_id(name) for name in message_names(sdir, role, "new")]
+
+
 def _message_ids(sdir):
     """Ids of every delivered message, in any inbox, read or not."""
     return {
-        int(_MESSAGE_FILE.match(name).group(1))
+        _name_id(name)
         for role in session.ROLES
         for sub in ("new", "cur")
-        for name in _inbox_names(sdir, role, sub)
+        for name in message_names(sdir, role, sub)
     }
 
 
@@ -121,14 +130,15 @@ def deliver(meta, envelope):
         raise TandemError("session %s has no %s inbox" % (meta["dir"], envelope["to"]))
     with session.locked(sdir):
         # Re-read under the lock: `meta` may predate a `tandem done` that ran
-        # while this command was parsing its body.
+        # while this command was parsing its body. Not `still_active`: an
+        # unreadable session.json is refused with its own error, not as ended.
         if not session.is_active(session.load_session(meta["dir"])):
             raise TandemError("session %s has ended" % meta["dir"])
         ids = _message_ids(sdir)
         reply_to = envelope.get("reply_to")
         if reply_to is not None and int(reply_to) not in ids:
             raise TandemError("--reply-to %s: no such message in session %s" % (reply_to, meta["dir"]))
-        msg = {"id": format_id(max(ids, default=0) + 1), "ts": session.iso(session._now())}
+        msg = {"id": format_id(max(ids, default=0) + 1), "ts": session.now_iso()}
         msg.update(envelope)
         name = msg["id"] + ".json"
         tmp = os.path.join(tmp_dir, name)
@@ -144,7 +154,7 @@ def _resolve_commit(meta, rev):
     top = meta.get("repo")
     if rev.startswith("-"):
         raise TandemError("--commit %s: not a commit" % rev)
-    sha = session._git(top, "rev-parse", "--verify", "--quiet", "--short=12", rev + "^{commit}") if top else None
+    sha = session.git(top, "rev-parse", "--verify", "--quiet", "--short=12", rev + "^{commit}") if top else None
     if not sha:
         raise TandemError("--commit %s: not a commit in %s" % (rev, top or "the session repo"))
     return sha
@@ -199,7 +209,7 @@ def run_send(args):
     return 0
 
 
-def _read_message(path):
+def read_message(path):
     """The envelope stored at `path`; FileNotFoundError passes through, anything else is a TandemError."""
     try:
         with open(path, encoding="utf-8") as f:
@@ -213,9 +223,9 @@ def _read_message(path):
 def peek(sdir, role):
     """The lowest-id unread message for `role`, left in `new/`; None if there is none."""
     new_dir = inbox_path(sdir, role, "new")
-    for name in _inbox_names(sdir, role, "new"):
+    for name in message_names(sdir, role, "new"):
         try:
-            return _read_message(os.path.join(new_dir, name))
+            return read_message(os.path.join(new_dir, name))
         except FileNotFoundError:
             # Consumed by a concurrent `recv` since the listing.
             continue
@@ -230,14 +240,14 @@ def pop(sdir, role):
     """
     new_dir = inbox_path(sdir, role, "new")
     cur_dir = inbox_path(sdir, role, "cur")
-    for name in _inbox_names(sdir, role, "new"):
+    for name in message_names(sdir, role, "new"):
         dest = os.path.join(cur_dir, name)
         try:
             os.rename(os.path.join(new_dir, name), dest)
         except FileNotFoundError:
             continue
         try:
-            return _read_message(dest)
+            return read_message(dest)
         except (OSError, TandemError) as exc:
             # Left in cur/ so its id stays taken; the next read moves on to the next message.
             raise TandemError("%s (set aside as read; read again for the next message)" % exc)
@@ -283,7 +293,7 @@ def receive(meta, role, consume=True, wait=False, timeout=None):
         msg = take(sdir, role)
         if msg is not None or not wait:
             return msg
-        if not session.is_active(session.load_session(meta["dir"])):
+        if not session.still_active(meta["dir"]):
             return None
         left = deadline - time.monotonic()
         if left <= 0:
@@ -363,7 +373,7 @@ def follow_log(meta, emit, follow=False, interval=POLL_INTERVAL):
             return
         if lines:
             continue
-        if not session.is_active(session.load_session(meta["dir"])):
+        if not session.still_active(meta["dir"]):
             # `done` writes its event under the lock after marking the session
             # ended; taking the lock waits for that write to finish.
             with session.locked(sdir):
@@ -395,7 +405,7 @@ def run_log(args):
 
 
 def pending_counts(sdir):
-    return {role: len(_inbox_names(sdir, role, "new")) for role in session.ROLES}
+    return {role: len(message_names(sdir, role, "new")) for role in session.ROLES}
 
 
 def last_messages(sdir):
@@ -449,18 +459,12 @@ def describe_session(meta):
 
 
 def stale_pointers():
-    """(repo path, session dir, reason) for pointers naming an ended or missing session."""
+    """(repo path, session dir, reason) for pointers naming an ended, missing or unreadable session."""
     stale = []
     for repo, dir_name in session.repo_pointers():
-        try:
-            meta = session.load_session(dir_name) if "/" not in dir_name else None
-        except TandemError:
-            stale.append((repo, dir_name, "unreadable"))
-            continue
-        if meta is None:
-            stale.append((repo, dir_name, "missing"))
-        elif not session.is_active(meta):
-            stale.append((repo, dir_name, "ended"))
+        why = session.session_state(dir_name)[1]
+        if why is not None:
+            stale.append((repo, dir_name, why))
     return stale
 
 

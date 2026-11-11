@@ -47,17 +47,6 @@ class WatchTestCase(TandemTestCase):
     def owner(self, role="driver"):
         return (session.read_watcher(self.sdir, role) or {}).get("pid")
 
-    def mark_ended(self):
-        meta = session.load_session(self.dir)
-        meta["ended"] = "2026-11-11T12:00:00Z"
-        session.save_session(meta)
-
-    def wait_for(self, cond, timeout=5.0):
-        end = time.monotonic() + timeout
-        while not cond():
-            if time.monotonic() > end:
-                self.fail("condition not met within %ss" % timeout)
-            time.sleep(FAST)
 
 
 class RingTest(WatchTestCase):

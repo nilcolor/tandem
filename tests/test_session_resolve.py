@@ -269,6 +269,31 @@ class AmbiguityTest(ResolveTestCase):
         self.assertEqual(self.resolve(), a)
 
 
+class SessionStateTest(ResolveTestCase):
+    def test_each_state(self):
+        d = self.init(self.make_repo(), "fix")
+        self.assertEqual(session.session_state(d), (session.load_session(d), None))
+        self.assertTrue(session.still_active(d))
+        self.end(d)
+        self.assertEqual(session.session_state(d)[1], "ended")
+        self.assertFalse(session.still_active(d))
+        with open(os.path.join(session.session_path(d), "session.json"), "w") as f:
+            f.write("{")
+        self.assertEqual(session.session_state(d), (None, "unreadable"))
+        self.assertFalse(session.still_active(d))
+        self.assertEqual(session.session_state("gone"), (None, "missing"))
+
+    def test_names_outside_the_spool_name_no_session(self):
+        sessions = os.path.join(self.tandem_home, "sessions")
+        os.makedirs(sessions)
+        for parent in (self.tandem_home, sessions):
+            with open(os.path.join(parent, "session.json"), "w") as f:
+                f.write('{"dir": "x", "ended": null}')
+        for name in ("", ".", "..", "../x", "a/b"):
+            self.assertIsNone(session.load_session(name), name)
+            self.assertEqual(session.session_state(name), (None, "missing"), name)
+
+
 class ShortNameTest(TandemTestCase):
     def test_short_name(self):
         self.assertEqual(session.short_name("apix--fix-csv-bom"), "fix-csv-bom")

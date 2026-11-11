@@ -19,10 +19,14 @@ RETRY_INTERVAL = 5.0
 SEND_TIMEOUT = 30.0
 START_TIMEOUT = 10.0
 AGY_ENV = ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN")
+# hooks.py matches agy's input against this to keep doorbells out of the console log.
+DOORBELL_PREFIX = "tandem doorbell"
+# One line of agentapi's output is enough for watch.log; its full error can be a page.
+ERROR_LINE_CAP = 200
 
 
 def doorbell(role):
-    return "tandem doorbell: new mail for %s. Run `tandem recv`." % role
+    return "%s: new mail for %s. Run `tandem recv`." % (DOORBELL_PREFIX, role)
 
 
 def detach_command(role):
@@ -36,11 +40,7 @@ def rung_path(sdir, role):
 
 def read_rung(sdir, role):
     """Highest message id already rung for `role`; 0 when nothing has been rung."""
-    try:
-        with open(rung_path(sdir, role), encoding="utf-8") as f:
-            text = f.read().strip()
-    except OSError:
-        return 0
+    text = (session.read_text(rung_path(sdir, role)) or "").strip()
     return int(text) if text.isdigit() else 0
 
 
@@ -50,11 +50,10 @@ def unrung_id(sdir, role):
     Ringing for the highest id covers every message below it: one ring per
     batch, and a message the agent leaves unread isn't rung again.
     """
-    names = maildir._inbox_names(sdir, role, "new")
-    if not names:
+    ids = maildir.unread_ids(sdir, role)
+    if not ids:
         return None
-    newest = int(names[-1][: -len(".json")])
-    return newest if newest > read_rung(sdir, role) else None
+    return ids[-1] if ids[-1] > read_rung(sdir, role) else None
 
 
 def mark_rung(sdir, role, msg_id):
@@ -102,13 +101,6 @@ def release_pidfile(sdir, role, pid):
                 pass
 
 
-def _active(meta):
-    try:
-        return session.is_active(session.load_session(meta["dir"]))
-    except TandemError:
-        return False
-
-
 def wait_once(meta, role, deadline=math.inf, interval=POLL_INTERVAL, clock=time.monotonic, sleep=time.sleep, pid=None):
     """Claude's asyncRewake waiter: the doorbell text on mail, None otherwise.
 
@@ -122,7 +114,7 @@ def wait_once(meta, role, deadline=math.inf, interval=POLL_INTERVAL, clock=time.
         _write_pidfile(sdir, role, pid, None)
     try:
         while True:
-            if not _active(meta) or superseded(sdir, role, pid):
+            if not session.still_active(meta["dir"]) or superseded(sdir, role, pid):
                 return None
             msg_id = unrung_id(sdir, role)
             if msg_id is not None:
@@ -201,11 +193,7 @@ def conversation_id(sdir, environ):
     Read on every ring because `/new` changes it; the launch-time env value is
     only the fallback for before any hook has run.
     """
-    try:
-        with open(conversation_path(sdir), encoding="utf-8") as f:
-            text = f.read().strip()
-    except (OSError, UnicodeDecodeError):
-        text = ""
+    text = (session.read_text(conversation_path(sdir)) or "").strip()
     return text or environ.get("ANTIGRAVITY_CONVERSATION_ID") or None
 
 
@@ -222,7 +210,7 @@ def _reported_error(output):
 def _first_line(text):
     for line in (text or "").splitlines():
         if line.strip():
-            return line.strip()[:200]
+            return line.strip()[:ERROR_LINE_CAP]
     return ""
 
 
@@ -284,7 +272,7 @@ def claim_agy_pidfile(sdir, role, ls_address, pid):
 
 
 def _stamp(text):
-    print("%s %s" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), text), flush=True)
+    print("%s %s" % (session.now_iso(), text), flush=True)
 
 
 def _ring(sdir, role, pid, msg_id, environ, log):
@@ -344,7 +332,7 @@ def serve(
         next_ls_check = clock()
         retry_at = None
         while True:
-            if not _active(meta):
+            if not session.still_active(meta["dir"]):
                 reason = "session ended"
                 return reason
             if superseded(sdir, role, pid):

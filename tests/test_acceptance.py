@@ -200,16 +200,6 @@ class AcceptanceTestCase(TandemTestCase):
         except FileNotFoundError:
             return []
 
-    def events(self, name):
-        return [r for r in session.read_log(self.sdir) if r.get("kind") == "event" and r.get("event") == name]
-
-    def wait_for(self, cond, timeout=10.0):
-        end = time.monotonic() + timeout
-        while not cond():
-            if time.monotonic() > end:
-                self.fail("condition not met within %ss" % timeout)
-            time.sleep(0.02)
-
     # teardown
 
     def watcher_processes(self):

@@ -103,6 +103,13 @@ def tokens(text):
         del word[:]
         started = False
 
+    def open_substitution(sep, kind):
+        nonlocal expands
+        expands = True
+        flush()
+        out.append((SEP, sep))
+        stack.append(kind)
+
     while i < n:
         c = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
@@ -115,16 +122,10 @@ def tokens(text):
                     word.append(nxt)
                 i += 2
             elif c == "$" and nxt == "(":
-                expands = True
-                flush()
-                out.append((SEP, "$("))
-                stack.append("paren")
+                open_substitution("$(", "paren")
                 i += 2
             elif c == "`":
-                expands = True
-                flush()
-                out.append((SEP, "`"))
-                stack.append("bq")
+                open_substitution("`", "bq")
                 i += 1
             else:
                 if c == "$":
@@ -194,9 +195,7 @@ def tokens(text):
                 started = False
             flush()
             if nxt == "(":
-                expands = True
-                out.append((SEP, c + "("))
-                stack.append("paren")
+                open_substitution(c + "(", "paren")
                 i += 2
                 continue
             if c == ">":
@@ -219,19 +218,15 @@ def tokens(text):
                 stack.pop()
             i += 1
         elif c == "`":
-            expands = True
-            flush()
-            out.append((SEP, "`"))
             if stack and stack[-1] == "bq":
+                flush()
+                out.append((SEP, "`"))
                 stack.pop()
             else:
-                stack.append("bq")
+                open_substitution("`", "bq")
             i += 1
         elif c == "$" and nxt == "(":
-            expands = True
-            flush()
-            out.append((SEP, "$("))
-            stack.append("paren")
+            open_substitution("$(", "paren")
             i += 2
         else:
             if c == "$":
@@ -407,8 +402,7 @@ def _git_writes(args):
     if sub == "branch":
         if any(a in _GIT_BRANCH_WRITES or a.startswith("--set-upstream-to=") for a in rest):
             return "git branch"
-        positional = [a for a in rest if not a.startswith("-")]
-        if not positional or any(a in _GIT_BRANCH_LISTS for a in rest):
+        if not _positional(rest) or any(a in _GIT_BRANCH_LISTS for a in rest):
             return None
     return "git " + sub
 

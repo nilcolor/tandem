@@ -1,6 +1,6 @@
 ---
 worth: later
-where: tandem/hooks.py agy_pretool, tandem/launch_agy.py build_profile
+where: tandem/hooks.py (agy_pretool), tandem/launch_agy.py (build_profile)
 added: 2026-11-11
 ---
 # A bypassed test prefix runs on the host with any arguments

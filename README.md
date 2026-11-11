@@ -111,6 +111,9 @@ Resolution order, first match wins:
 - Steps 1 and 2 return an ended session too; each command decides whether that is an error (hooks and
   watchers exit quietly on one). A `--session` short name matches the current repo's sessions first,
   then all sessions; among several matches, the single active one wins.
+- Anything waiting on a session (`recv --wait`, `log -f`, both watchers) stops when it ends, is
+  removed, or its `session.json` stops parsing: `send` refuses such a session, so no more mail can
+  arrive. `session.json` is replaced atomically, so a reader never sees it half-written.
 - **One active session per checkout.** `tandem init` refuses while one is active unless `--replace`:
   one working tree can't take two drivers anyway. `--replace` ends the old session without a
   summary (its `session.json` gets `ended` and `replaced_by`, its log a `replaced` event); run

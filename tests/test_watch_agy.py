@@ -124,21 +124,6 @@ class AgyWatchTestCase(TandemTestCase):
         text = record if isinstance(record, str) else json.dumps(record)
         session.write_text_atomic(self.pidfile(role), text + "\n")
 
-    def mark_ended(self):
-        meta = session.load_session(self.dir)
-        meta["ended"] = "2026-11-11T12:00:00Z"
-        session.save_session(meta)
-
-    def events(self, name):
-        return [r for r in session.read_log(self.sdir) if r.get("kind") == "event" and r.get("event") == name]
-
-    def wait_for(self, cond, timeout=10.0):
-        end = time.monotonic() + timeout
-        while not cond():
-            if time.monotonic() > end:
-                self.fail("condition not met within %ss" % timeout)
-            time.sleep(FAST)
-
     def live_process(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 

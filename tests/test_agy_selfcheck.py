@@ -7,7 +7,7 @@ import sys
 from unittest import mock
 
 from tandem import TandemError, cli, launch_agy, session
-from tests.helpers import TandemTestCase
+from tests.helpers import FakeExec, TandemTestCase
 
 # Stands in for agy: answers --version and print-mode /config the way agy 1.5.5 does
 # (config under command.data.config), and records each call to FAKE_AGY_LOG.
@@ -58,14 +58,6 @@ with open(os.environ["FAKE_AGY_OUT"], "w") as f:
     json.dump({"argv": args, "cwd": os.getcwd(), "pid": os.getpid(),
                "session": os.environ.get("TANDEM_SESSION"), "role": os.environ.get("TANDEM_ROLE")}, f)
 """
-
-
-class FakeExec:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, argv, env, cwd):
-        self.calls.append((argv, env, cwd))
 
 
 class AgyLaunchTestCase(TandemTestCase):
@@ -130,9 +122,6 @@ class AgyLaunchTestCase(TandemTestCase):
     def cache(self):
         with open(launch_agy.check_path(), encoding="utf-8") as f:
             return json.load(f)
-
-    def events(self, name):
-        return [r for r in session.read_log(self.sdir) if r.get("kind") == "event" and r.get("event") == name]
 
 
 class SelfCheckTest(AgyLaunchTestCase):

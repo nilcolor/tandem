@@ -12,14 +12,19 @@ tandem/__init__.py         __version__ and TandemError (printed as `tandem: <msg
 tandem/__main__.py         python3 -m tandem
 tandem/cli.py              argparse, global --session, the command table and dispatch
 tandem/paths.py            TANDEM_HOME, owner-only spool dirs, the shim path and quoted shim commands
-tandem/session.py          naming, init, resolution, session.json, repo pointers, the session lock,
-                           log.jsonl, pidfiles, role claims, done/summary, harness env and exec
-tandem/maildir.py          envelopes, id allocation, deliver (send), pop/peek (recv), rendering, log -f
+tandem/session.py          naming, init, resolution, session.json and its state, repo pointers, the
+                           session lock, log.jsonl, pidfiles, role claims, done/summary, harness env and
+                           exec; shared helpers (now_iso, read_text, atomic writes, git, `seconds` for
+                           CLI durations)
+tandem/maildir.py          envelopes, id allocation, deliver (send), pop/peek (recv), rendering, log -f,
+                           status
 tandem/watch.py            doorbell text, rung markers; watch --once (Claude) and --detach (agy)
 tandem/cmdline.py          sh-style lexer, bypass prefix match and the navigator write gate
 tandem/hooks.py            `tandem hook <event>`: Claude's prompt log and the four agy hooks
-tandem/protocol.py         renders templates/protocol.md for a peer and role; the tandem subcommands
-                           and test prefixes each role runs unprompted (one list for every rule)
+tandem/protocol.py         renders templates/protocol.md for a peer and role (code-owned values such as
+                           message types come in through placeholders); the launchers' initial prompt
+                           and its prefix; the tandem subcommands and test prefixes each role runs
+                           unprompted (one list for every rule)
 tandem/templates/protocol.md  the protocol both peers get (shared, role and peer sections)
 tandem/launch_claude.py    `tandem claude`: settings.json, protocol, argv/env, exec
 tandem/launch_agy.py       `tandem agy`: hooks.json, rules, profiles, user deny carry-over, self-check
@@ -41,7 +46,9 @@ Conventions:
 - Subclass `tests.helpers.TandemTestCase`. It gives each test a temp `HOME` and `TANDEM_HOME`,
   clears `TANDEM_SESSION`/`TANDEM_ROLE` and every `ANTIGRAVITY_*` variable, and isolates git from
   the user's config. `make_repo()` builds a fixture repo; `run_cli()` runs in-process, `run_shim()`
-  runs the shim under the interpreter running the suite.
+  runs the shim under the interpreter running the suite. Shared helpers live there too
+  (`events`, `mark_ended`, `dead_pid`, `wait_for`, `FakeExec`); add one there rather than copying it
+  into a second test file.
 - Never touch the real `~/.tandem`, `~/.claude` or `~/.gemini`, and never start a real `claude` or
   `agy`. Harness boundaries are faked: a fake `claude`/`agy` on a test PATH, a fake agentapi through
   `ANTIGRAVITY_AGENTAPI_EXE`, a loopback listener standing in for agy's language server (`FakeLS`),
@@ -68,7 +75,8 @@ harness. Nothing goes into the target repo or the user's global config.
   policy (navigator, fallback or driver profile, deny merged with the user's global deny).
   `--add-dir <session dir>` makes agy load `.agents/hooks.json` and `.agents/rules/AGENTS.md` from
   it. `hooks.json` has a single top-level hook name, `tandem`, holding the events; event names at
-  the top level load nothing.
+  the top level load nothing. Its events come from `hooks.HOOKS` (each agy hook's `event`), so a hook
+  is named once.
 - Hook commands call the shim by absolute path; agents call plain `tandem …`, because permission
   rules match the command text.
 
@@ -92,8 +100,8 @@ Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status
 
 - Comments justify decisions (why a value, why a workaround, why not the obvious option). They
   never narrate code. Context that doesn't fit a comment belongs here or in README.md.
-- Deferred work goes to `docs/backlog/<slug>.md`, one file per item (frontmatter `worth`, `added`
-  and, when it points at code, `where`; H1 title; why it was deferred). `git rm` it in the change
+- Deferred work goes to `docs/backlog/<slug>.md`, one file per item (frontmatter `worth`, then
+  `where` when it points at code, as `path (symbol)`, then `added`; H1 title; why it was deferred). `git rm` it in the change
   that lands it.
 - README.md must match the code: when behaviour changes, fix every line it contradicts. Probe
   records and rejected alternatives stay, labelled as history.

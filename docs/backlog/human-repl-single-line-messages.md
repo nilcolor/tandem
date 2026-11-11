@@ -1,6 +1,6 @@
 ---
 worth: later
-where: tandem/human.py parse_line
+where: tandem/human.py (parse_line)
 added: 2026-11-11
 ---
 # `tandem human` sends one line per message
