@@ -264,6 +264,75 @@ class ProfileTest(AgyFilesTestCase):
         self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", "driver"))
 
 
+class UserDenyTest(AgyFilesTestCase):
+    """A written deny replaces agy's global one, so the user's own denies are carried over."""
+
+    def write_settings(self, doc, path=None):
+        path = path or os.path.join(self.home, ".gemini", "antigravity-cli", "settings.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(doc if isinstance(doc, str) else json.dumps(doc))
+        return path
+
+    def deny(self, kind, settings_path=None):
+        return launch_agy.build_profile(self.meta, kind, settings_path)["permissions"]["deny"]
+
+    def test_default_path_is_under_home(self):
+        self.write_settings({"permissions": {"allow": ["command(ls)"], "deny": ["command(rm -rf)"]}})
+        self.assertEqual(launch_agy.user_deny(), ["command(rm -rf)"])
+        self.assertEqual(self.deny("navigator"), ["write_file(*)", "command(rm -rf)"])
+        self.assertEqual(self.deny("fallback"), ["write_file(*)", "command(rm -rf)"])
+        self.assertEqual(self.deny("driver"), ["command(rm -rf)"])
+
+    def test_user_allow_is_not_carried_over(self):
+        self.write_settings({"permissions": {"allow": ["command(ls)"], "deny": []}})
+        for kind in launch_agy.PROFILES:
+            self.assertNotIn("command(ls)", launch_agy.build_profile(self.meta, kind)["permissions"]["allow"], kind)
+
+    def test_injected_path(self):
+        path = self.write_settings({"permissions": {"deny": ["command(git push)", "command(curl)"]}}, os.path.join(self.tmp, "agy.json"))
+        self.assertEqual(self.deny("driver", path), ["command(git push)", "command(curl)"])
+        self.assertEqual(self.deny("driver"), [])
+        written = launch_agy.write_profile(self.meta, "driver", settings_path=path)
+        self.assertEqual(self.read_json(written)["permissions"]["deny"], ["command(git push)", "command(curl)"])
+        launch_agy.write_session_files(self.meta, "navigator", settings_path=path)
+        self.assertEqual(
+            self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"],
+            ["write_file(*)", "command(git push)", "command(curl)"],
+        )
+
+    def test_deduplicated(self):
+        path = self.write_settings({"permissions": {"deny": ["write_file(*)", "command(rm -rf)", "command(rm -rf)"]}})
+        self.assertEqual(self.deny("navigator", path), ["write_file(*)", "command(rm -rf)"])
+        self.assertEqual(self.deny("driver", path), ["write_file(*)", "command(rm -rf)"])
+
+    def test_missing_or_unreadable_file(self):
+        self.assertEqual(launch_agy.user_deny(os.path.join(self.tmp, "nope.json")), [])
+        self.assertEqual(self.deny("navigator", os.path.join(self.tmp, "nope.json")), ["write_file(*)"])
+        self.assertEqual(launch_agy.user_deny(self.tmp), [])
+        unreadable = self.write_settings({"permissions": {"deny": ["command(rm -rf)"]}}, os.path.join(self.tmp, "locked.json"))
+        os.chmod(unreadable, 0)
+        self.addCleanup(os.chmod, unreadable, 0o600)
+        if not os.access(unreadable, os.R_OK):
+            self.assertEqual(launch_agy.user_deny(unreadable), [])
+
+    def test_malformed_shapes_give_nothing(self):
+        for doc in ("{", "[]", "null", {"permissions": []}, {"permissions": {"deny": "command(rm)"}}, {"other": 1}):
+            path = self.write_settings(doc, os.path.join(self.tmp, "bad.json"))
+            self.assertEqual(launch_agy.user_deny(path), [], doc)
+
+    def test_non_string_and_blank_rules_skipped(self):
+        path = self.write_settings({"permissions": {"deny": [1, None, "", "  ", {"x": 1}, "command(rm -rf)"]}})
+        self.assertEqual(launch_agy.user_deny(path), ["command(rm -rf)"])
+
+    def test_user_file_is_never_written(self):
+        path = self.write_settings({"permissions": {"deny": ["command(rm -rf)"]}})
+        before = (self.read_text(path), os.stat(path).st_mtime_ns)
+        for kind in launch_agy.PROFILES:
+            launch_agy.write_profile(self.meta, kind, settings_path=path)
+        self.assertEqual((self.read_text(path), os.stat(path).st_mtime_ns), before)
+
+
 class TestPrefixFlowTest(AgyFilesTestCase):
     def setUp(self):
         super().setUp()

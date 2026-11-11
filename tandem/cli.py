@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, hooks, launch_claude, maildir, session, watch
+from tandem import TandemError, __version__, hooks, launch_agy, launch_claude, maildir, session, watch
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -63,6 +63,12 @@ register(
     "launch Claude Code as this session's driver or navigator (execs claude)",
     launch_claude.configure_claude,
     launch_claude.run_claude,
+)
+register(
+    "agy",
+    "launch agy as this session's navigator or driver (checks the sandbox profile, execs agy)",
+    launch_agy.configure_agy,
+    launch_agy.run_agy,
 )
 register(
     "hook",

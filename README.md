@@ -159,7 +159,7 @@ opens panes: the user runs each launcher in whatever terminal they like.
 | Command | Does |
 |---|---|
 | `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, `UserPromptSubmit` human-input log, permissions) into the session dir; `exec claude --add-dir <session-dir> --settings <file> --append-system-prompt <protocol> [extra] -- <tandem: prompt>` |
-| `tandem agy [--role navigator\|driver]` | writes the agy profile (sandbox + `unsandboxed(<test cmd>)` for the navigator, `--mode auto` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir>` |
+| `tandem agy [--role navigator\|driver] [--profile auto\|fallback]` | runs the navigator self-check, writes the agy profile (sandbox + `unsandboxed(<test cmd>)` for the navigator, `--mode auto` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir> [--mode auto] --prompt-interactive=<tandem: prompt> [extra]` |
 | `tandem human` | small REPL: tails the `human` inbox (escalations, questions) and sends to either role |
 | `tandem dash` (later) | web dashboard over the session dir (`log.jsonl`, `plan.md`, `decisions.md`, inboxes); not designed yet, feasibility noted in [Dashboard](#dashboard-tandem-dash-later-stdlib-is-enough) |
 
@@ -194,6 +194,27 @@ opens panes: the user runs each launcher in whatever terminal they like.
   `test_cmds` with whitespace collapsed; one containing `(` or `)` is left out of the rules, since it
   would end the rule early, but the hook still matches it. Generated hooks.json and all three
   profiles were loaded with print-mode `/hooks` and `/config` on 1.5.5 (no model turn).
+- **Each profile's `deny` carries the user's own.** A `deny` in `--settings`, even `[]`, replaces
+  the global one, so tandem writes its own deny rules followed by the user's global agy deny
+  (`~/.gemini/antigravity-cli/settings.json` `permissions.deny`, read and never written,
+  deduplicated). A user's `command(rm -rf)` stays in force under every profile. The user's global
+  `allow` is not carried over: the profile's allowlist is the whole allowlist.
+- **Self-check (`tandem agy`, navigator, `--profile auto`).** `agy --version`, then
+  `agy --settings <navigator profile in a temp dir> -p=/config --output-format json` (30 s timeout,
+  no model turn). It passes when the printed config shows the profile's `toolPermission`,
+  `enableTerminalSandbox` and every allow and deny rule, and agy says nothing about `unsandboxed`
+  being unsupported. That proves only that the profile parses (`/config` doesn't validate rule
+  kinds), so the version carries the rest: on a version in `VERIFIED_AGY_VERSIONS` (1.5.4, 1.5.5,
+  where live sessions confirmed the bypass) the navigator profile is used silently; on any other
+  version that parses it is still used (the user's choice of sandbox + write gate), with a one-line
+  warning that the bypass is unverified and a pointer to `--profile fallback`. A failed check
+  switches to the fallback profile with a one-line warning. The result is cached in
+  `$TANDEM_HOME/agy-check.json` keyed by `agy --version` (a timeout isn't cached), and the launch
+  logs an `agy_profile` event with the profile used. `--profile fallback` skips the check; a driver
+  never runs it.
+- `tandem agy` starts agy with `--prompt-interactive=<tandem: line>`, which gives agy a first turn in
+  the TUI, so `SessionStart` fires and tells it to start its watcher; `agy-preinvocation` skips the
+  line. A driver also gets `--mode auto`. agy's own arguments go after `--`.
 - Consequence: `tandem …` commands must run outside the sandbox, the same as tests. The sandbox
   blocks reads outside the workspace, and `tandem` needs the shim and package from its checkout plus
   `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox too. The hook
@@ -435,9 +456,13 @@ user's own config stays untouched.
 - **Fallback profile (option 1)**, used if `unsandboxed` rules stop working: no sandbox,
   `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
   `command(dip rspec)`, never `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
-  tandem checks at startup that a bypass rule still works and switches to this profile if it doesn't.
+  tandem checks at startup that agy loads the navigator profile as written and switches to this
+  profile if it doesn't; a version not yet verified live only warns (see the self-check under
+  [Launchers](#launchers-tandem-peer-is-the-per-peer-adapter)). Every profile's `deny` also carries
+  the user's global agy deny rules.
 - **Driver profile (when agy drives)**: `--mode auto` plus the tandem and git allowlist
-  (`command(tandem)`, `command(git)`, `toolPermission: request-review`, `deny: []`), no sandbox
+  (`command(tandem)`, `command(git)`, `toolPermission: request-review`, `deny` = the user's global
+  agy deny, often `[]`), no sandbox
   (the driver needs network and the full toolchain; on 1.5.4 the sandbox also made the workspace
   read-only). Prompts are left only
   for irreversible actions, which the user wants to see anyway.
@@ -617,8 +642,9 @@ All with print-mode slash commands (`num_turns: 0`), so no model turn was spent.
   scope, and the log line `CLI settings initialized: permissions=&{Allow:[unsandboxed(go test) …]}`
   appears. The fallback and driver profiles load the same way.
 - **An empty `deny: []` replaces the global deny; an omitted `deny` keeps it** (`-p=/config`: the
-  global `command(rm -rf)` stays with no key and disappears with `[]`). The driver profile writes
-  `deny: []`, so the profile stays the whole policy.
+  global `command(rm -rf)` stays with no key and disappears with `[]`). Since any written `deny`
+  replaces the global one, every profile writes tandem's deny rules plus the user's global ones
+  (Task 15; Task 14 had written `deny: []` for the driver, which dropped them).
 - **`/config` and `/permissions` echo rule strings without validating them**: a profile with
   `bogus(x)` shows `bogus(x)` too. They prove a profile parsed and replaced the global list; they
   can't prove agy honours a rule kind. A startup self-check built on `/config` alone only catches a
@@ -708,6 +734,7 @@ None blocking the code. Settle while building v0:
 5. ~~Is the workspace still read-only inside the 1.5.5 sandbox?~~ No. The navigator profile gains
    the hook's write gate (`force_ask` for write-looking commands). Whether `force_ask` shows a prompt
    under `proceed-in-sandbox` gets checked live in Task 17.
-6. What the `tandem agy` self-check can test. `/config` doesn't validate rule kinds, so it can only
-   confirm the profile parses. The honest signal is the agy version: record versions where Task 17
-   passed and treat any other version as unverified (warn, or fall back).
+6. ~~What the `tandem agy` self-check can test.~~ Settled in Task 15: `/config` proves the profile
+   parses and its rules survive; the version decides the rest. `VERIFIED_AGY_VERSIONS` (1.5.4,
+   1.5.5) holds the versions where a live session confirmed the bypass; any other version warns and
+   keeps the navigator profile. Add a version there after re-running the live probe on it.
