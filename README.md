@@ -240,6 +240,7 @@ All commands resolve the session as described in [Finding the session](#finding-
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
+| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions |
 
 ## Waking an agent: the doorbell rule
 

@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, maildir, session, watch
+from tandem import TandemError, __version__, hooks, maildir, session, watch
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -57,6 +57,12 @@ register(
     "write summary.md, end the session and clear the repo pointer",
     session.configure_done,
     session.run_done,
+)
+register(
+    "hook",
+    "internal: run a harness hook (stdin JSON in, JSON or nothing out, always exit 0)",
+    hooks.configure_hook,
+    hooks.run_hook,
 )
 
 
