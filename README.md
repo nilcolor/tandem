@@ -62,7 +62,8 @@ show where things stand. When the work is done the driver writes its wrap-up, as
 
 Sessions live in a **global spool**, `~/.tandem/sessions/<session>/`, not in the target repo. That
 keeps the bus out of the repo's git state, and both launchers attach it to the harness's workspace
-with `--add-dir`. `TANDEM_HOME` moves the whole spool (default `~/.tandem`).
+with `--add-dir`. `TANDEM_HOME` moves the whole spool (default `~/.tandem`). tandem creates the
+spool's directories owner-only (0700): the log holds every prompt typed into a console.
 
 ### Naming
 
@@ -70,11 +71,12 @@ The session name is only a label for addressing; the ticket is separate, optiona
 
 | Command | Name |
 |---|---|
-| `tandem init` | derived from the branch (`feature/login-timeout` → `login-timeout`); on detached HEAD or `main`, `<repo>-<MMDD-HHMM>` |
+| `tandem init` | derived from the branch (`feature/login-timeout` → `login-timeout`); on detached HEAD, `main` or `master`, `<repo>-<MMDD-HHMM>` |
 | `tandem init fix-csv-bom` | any free-form name |
 | `tandem init --ticket APIX-123` | defaults to the ticket key; the ticket is stored for intake |
 
-- Names are sanitized to `[a-z0-9-]` on disk; the original string is kept in `session.json`.
+- Names are sanitized to `[a-z0-9-]` on disk (NFKD first, so `Café` becomes `cafe`; capped at 48
+  characters); the original string is kept in `session.json`.
 - The spool is global, so the directory is prefixed with the repo, `~/.tandem/sessions/apix--fix-csv-bom/`,
   while the user keeps typing just `fix-csv-bom` (resolution is per repo). A collision in the same
   repo appends `-2`.
@@ -98,7 +100,7 @@ Resolution order, first match wins:
 | # | Source | Used by |
 |---|---|---|
 | 1 | `--session <name>` | explicit override, from anywhere |
-| 2 | `TANDEM_SESSION` | anything inside a launched harness: hooks, `tandem send/recv` |
+| 2 | `TANDEM_SESSION` | `tandem send/recv/watch` typed by the agent inside a launched harness (generated hooks pass `--session <dir>`, step 1) |
 | 3 | the active session for the current repo (`git rev-parse --show-toplevel`, so subdirectories work) | launchers, the normal case |
 | 4 | the only active session on the machine | `tandem human` outside any repo |
 | 5 | otherwise: error listing the active sessions | ambiguity is never guessed |
@@ -110,7 +112,10 @@ Resolution order, first match wins:
   watchers exit quietly on one). A `--session` short name matches the current repo's sessions first,
   then all sessions; among several matches, the single active one wins.
 - **One active session per checkout.** `tandem init` refuses while one is active unless `--replace`:
-  one working tree can't take two drivers anyway.
+  one working tree can't take two drivers anyway. `--replace` ends the old session without a
+  summary (its `session.json` gets `ended` and `replaced_by`, its log a `replaced` event); run
+  `tandem done` first to keep its `summary.md`. A pointer to an unreadable `session.json` counts as
+  stale, like an ended or missing one.
 - **Ending.** `tandem done` writes the summary and clears the repo pointer. A stale pointer (one naming
   an ended or missing session) shows in `tandem status`; a plain `tandem init` takes over from it.
   After `done` the repo resolves to no session, so an ended session's `log`/`status` need `--session`.
@@ -131,11 +136,12 @@ Resolution order, first match wins:
   inbox/driver/{tmp,new,cur}/
   inbox/navigator/{tmp,new,cur}/
   inbox/human/{tmp,new,cur}/
-  log.jsonl          # append-only copy of every message; input for the final summary
+  log.jsonl          # append-only, one JSON record per line: `message` (every envelope), `console`
+                     # (human input typed into a harness), `event` (init, replaced, role_claimed,
+                     # agy_profile, watcher_started, watcher_exited, done); input for the summary
   plan.md            # driver-owned
   decisions.md       # driver-owned; the summary derives from it
   summary.md         # written by `tandem done`; agents write decisions.md, not this
-  review-N.md        # optional per-checkpoint review artifacts
 ```
 
 - Delivery: write to `tmp/`, then `mv` to `new/`. The reader never sees a partial message.
@@ -206,7 +212,8 @@ opens panes: the user runs each launcher in whatever terminal they like.
   Claude's own arguments go after `--` (`tandem claude -- --model opus`); tandem puts its initial
   `tandem:` prompt after a second `--`, so a variadic flag such as `--allowed-tools` can't swallow it.
 - Launchers export `TANDEM_SESSION` and `TANDEM_ROLE`, so hooks and `tandem send/recv` know who they
-  are without flags.
+  are without flags, and `cd` to the repo's toplevel before `exec`, so the harness's workspace is
+  the whole checkout even when the launcher ran in a subdirectory.
 - **Protocol parity.** Both peers get the doorbell protocol and role rules from launch-time,
   user-authored instructions rendered from one template: Claude through `--append-system-prompt`
   (copy in `peers/claude/protocol.md`), agy through `.agents/rules/AGENTS.md` in the session dir,
@@ -224,9 +231,10 @@ opens panes: the user runs each launcher in whatever terminal they like.
   `Stop`, each calling `'<shim>' --session <dir> hook agy-…`; `.agents/rules/AGENTS.md`, the rendered
   protocol for agy's role (refused if over agy's 24 KB rules cap); and `peers/agy/profile.json`, one
   of three profiles (see [Decision](#decision)). The test prefixes come from `session.json`
-  `test_cmds` with whitespace collapsed; one containing `(` or `)` is left out of the rules, since it
-  would end the rule early, but the hook still matches it. Generated hooks.json and all three
-  profiles were loaded with print-mode `/hooks` and `/config` on 1.5.5 (no model turn).
+  `test_cmds` (whitespace collapsed and duplicates dropped at `init`); one containing `(` or `)` is
+  left out of the rules, since it would end the rule early, and the hook and Claude's allow rules
+  leave it out too, so all three agree. Generated hooks.json and all three profiles were loaded with
+  print-mode `/hooks` and `/config` on 1.5.5 (no model turn).
 - **Each profile's `deny` carries the user's own.** A `deny` in `--settings`, even `[]`, replaces
   the global one, so tandem writes its own deny rules followed by the user's global agy deny
   (`~/.gemini/antigravity-cli/settings.json` `permissions.deny`, read and never written,
@@ -241,17 +249,25 @@ opens panes: the user runs each launcher in whatever terminal they like.
   where live sessions confirmed the bypass) the navigator profile is used silently; on any other
   version that parses it is still used (the user's choice of sandbox + write gate), with a one-line
   warning that the bypass is unverified and a pointer to `--profile fallback`. A failed check
-  switches to the fallback profile with a one-line warning. The result is cached in
-  `$TANDEM_HOME/agy-check.json` keyed by `agy --version` (a timeout isn't cached), and the launch
+  switches to the fallback profile with a one-line warning. A definitive result (the config loaded
+  as written, a setting or rule lost, or agy's "unsupported" notice) is cached in
+  `$TANDEM_HOME/agy-check.json` keyed by `agy --version`; a timeout, a non-zero exit or output that
+  isn't a config (an expired login, an update banner, a first-run prompt) is re-checked on the next
+  launch. A warning from a cached failure names the file to delete to re-run the check. The launch
   logs an `agy_profile` event with the profile used. `--profile fallback` skips the check; a driver
-  never runs it.
+  never runs it, and `tandem agy --role driver --profile fallback` warns that the flag is for the
+  navigator and uses the driver profile.
 - `tandem agy` starts agy with `--prompt-interactive=<tandem: line>`, which gives agy a first turn in
   the TUI, so `SessionStart` fires and tells it to start its watcher; `agy-preinvocation` skips the
   line. A driver also gets `--mode auto`. agy's own arguments go after `--`.
-- Consequence: `tandem …` commands must run outside the sandbox, the same as tests. The sandbox
-  blocks reads outside the workspace, and `tandem` needs the shim and package from its checkout plus
-  `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox too. The hook
-  forces `BypassSandbox` for `tandem …` commands, and the profile carries `unsandboxed(tandem)`.
+- Consequence: the tandem commands agents run must run outside the sandbox, the same as tests. The
+  sandbox blocks reads outside the workspace, and `tandem` needs the shim and package from its
+  checkout plus `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox
+  too. Only the subcommands the protocol has agents type are bypassed: the hook forces
+  `BypassSandbox` for `tandem send`, `recv`, `status`, `log` and `watch`, and the navigator profile
+  carries `unsandboxed(tandem send)` and so on for each. A bare `unsandboxed(tandem)` would also
+  have let a sandboxed navigator run `tandem claude -- --permission-mode bypassPermissions` (a
+  host-side writer), `tandem init --replace` or `tandem done` with no prompt.
 - New peers (Copilot, Codex) are added as new launchers plus a peer section in the protocol
   template; the bus, the CLI and the shared rules don't change.
 
@@ -263,10 +279,10 @@ build step and no dependencies.
 - **Layout: a `tandem/` package plus a `bin/tandem` shim** (`#!/usr/bin/env python3`, no `.py`
   extension) that resolves its own realpath and imports the package. Install is a clone plus a
   symlink of `bin/tandem` into `~/.local/bin` (`make install`). Agents type plain `tandem …`, which
-  agy's `unsandboxed(tandem)` and Claude's `Bash(tandem *)` match. Generated hooks call the shim by
-  absolute path (so they don't depend on the harness's PATH) and are all tandem subcommands
-  (`tandem hook <event>`, and `tandem watch --once` for Claude's waiter), so hook logic is tested
-  Python rather than generated shell.
+  agy's `unsandboxed(tandem send)` and Claude's `Bash(tandem send *)` (one rule per protocol
+  subcommand) match. Generated hooks call the shim by absolute path (so they don't depend on the
+  harness's PATH) and are all tandem subcommands (`tandem hook <event>`, and `tandem watch --once`
+  for Claude's waiter), so hook logic is tested Python rather than generated shell.
 - **3.9 floor**, because `/usr/bin/python3` from Apple's Command Line Tools is 3.9.6 and Linux distros
   ship 3.9–3.12. `env python3` picks whichever comes first on PATH, so nothing newer may be assumed.
 - **Stdlib only** (`json`, `os.rename` for maildir delivery, `hashlib`, `argparse`, `subprocess`,
@@ -304,26 +320,30 @@ Not designed yet; this only records that Python stdlib won't block it.
 ### CLI
 
 All commands resolve the session as described in [Finding the session](#finding-the-session-from-any-pane);
-`--as` defaults to `TANDEM_ROLE` inside a launched harness.
+`--as` defaults to `TANDEM_ROLE` inside a launched harness. `tandem --version` prints the version.
+
+Exit codes: 0 ok; 1 any error, usage errors included (argparse's usual 2 would read as mail to
+Claude's waiter); 2 mail (`watch --once` only); 3 no mail or timeout (`recv`); 130 Ctrl-C in a
+blocking command.
 
 | Command | Purpose |
 |---|---|
-| `tandem init [name] [--ticket KEY] [--task TEXT \| --task-file F] [--replace]` | create the session tree and point the repo at it |
-| `tandem send [--as R] --to R [--type T] [--reply-to ID]` | body from stdin or arg; tmp, mv to new, append to log |
+| `tandem init [name] [--ticket KEY] [--task TEXT \| --task-file F] [--test-cmd CMD]... [--replace]` | create the session tree and point the repo at it. `--test-cmd` (repeatable) replaces detection: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec` |
+| `tandem send [--as R] --to R [--type T] [--reply-to ID] [--commit REV] [--file PATH]... [--expects-reply \| --no-reply] [body]` | body as the argument, else from stdin (refused on a terminal); tmp, mv to new, append to log. `expects_reply` defaults to true for `plan`, `review_request`, `question` and `escalate` |
 | `tandem recv [--as R] [--wait] [--timeout S] [--peek] [--json]` | pop the oldest (lowest-id) `new/` message to `cur/` and print it; `--peek` doesn't consume; `--timeout` implies `--wait`; exit 3 and `no mail for <role>` on stderr when nothing arrives; a wait gives up once the session has ended |
-| `tandem watch [--as R] (--once [--deadline S] \| --detach)` | wait for mail and ring the harness doorbell; driver and navigator only. `--once` (Claude's asyncRewake waiter): exit 2 with the doorbell on stderr when an unread message above `peers/<role>/rung` arrives (one ring per batch, for the highest id; mail left unread isn't rung again), exit 0 at `--deadline`, when the session ends, or when a newer waiter's pid takes over `peers/<role>/watch.pid` (bare pid, removed on exit). `--detach` (agy, run by agy itself through `run_command`; refuses without `ANTIGRAVITY_LS_ADDRESS`/`ANTIGRAVITY_CSRF_TOKEN`): double-forks a watcher into its own session with stdio on `peers/<role>/watch.log`, prints its pid and returns at once. The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`, the id read from `peers/agy/conversation_id` on every ring (fallback `ANTIGRAVITY_CONVERSATION_ID`); a failed send (non-zero exit or an `{"error":…}` reply) isn't marked rung and is retried every 5 s. Pidfile `{pid, ls_address}`: a live watcher for the same LS address means "already running", any other pidfile is taken over. It exits when the LS port refuses a connect (checked every 5 s), when superseded, when the session ends or on SIGTERM, and logs `watcher_started`/`watcher_exited` events |
+| `tandem watch [--as R] (--once [--deadline S] \| --detach)` | wait for mail and ring the harness doorbell; driver and navigator only. `--once` (Claude's asyncRewake waiter): exit 2 with the doorbell on stderr when an unread message above `peers/<role>/rung` arrives (one ring per batch, for the highest id; mail left unread isn't rung again), exit 0 at `--deadline`, when the session ends, or when a newer waiter's pid takes over `peers/<role>/watch.pid` (`{"pid": …, "ls_address": null}`, removed on exit). `--detach` (agy, run by agy itself through `run_command`; refuses without `ANTIGRAVITY_LS_ADDRESS`/`ANTIGRAVITY_CSRF_TOKEN`): double-forks a watcher into its own session with stdio on `peers/<role>/watch.log`, prints its pid and returns at once. The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`, the id read from `peers/agy/conversation_id` on every ring (fallback `ANTIGRAVITY_CONVERSATION_ID`); a failed send (non-zero exit or an `{"error":…}` reply) isn't marked rung and is retried every 5 s. Pidfile `{pid, ls_address}`: a live watcher for the same LS address means "already running" (decided by the detached child under the session lock), any other pidfile is taken over. It exits when the LS port refuses a connect (checked every 5 s), when superseded, when the session ends or on SIGTERM, and logs `watcher_started`/`watcher_exited` events. `ANTIGRAVITY_LS_ADDRESS` is read as `host:port`, `[v6]:port` or a URL such as `http://host:port/`; the exact form agy uses is unverified (plan Task 17), so an address in none of those forms skips the LS check (logged once) instead of reading as a gone server |
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
 | `tandem human` | REPL for the user, sending as `human`; refuses an ended session. Every 1 s it pops new `human` mail to `cur/` and prints it, then reads input lines (one line is one message). `@driver <text>` / `@navigator <text>` answer (`reply_to`) the latest message from that role the user has read (`inbox/human/cur/`), else send a `decision`; `@role:<type> <text>` sets the type (only `answer` threads); bare text goes to the driver; a mistyped `@role`, type or `/command` is refused, never sent. `/log` and `/status` print this session's `tandem log` / `tandem status` output, `/help`, `/quit`. Ctrl-D, Ctrl-C and `/quit` exit 0; when the session ends (`tandem done` elsewhere) it prints any last mail, says so and exits 0 |
-| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
+| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. The hook fires before every model call of a turn with the same input and the payload carries no known turn marker, so the same text typed twice in a row (`yes`, then `yes`) is logged once (plan Task 17 looks for a marker). `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
 
 ## Waking an agent: the doorbell rule
 
 An LLM session only acts when its harness gives it a turn, so notification is the hard part, not
 transport. **The nudge is a doorbell, not the mail.** Whatever wakes an agent carries a fixed line
-("run `tandem recv --as <role>`"), never message content. Lost or duplicate nudges are therefore
-harmless, and the bus stays the single source of truth.
+(``tandem doorbell: new mail for <role>. Run `tandem recv`.``), never message content. Lost or
+duplicate nudges are therefore harmless, and the bus stays the single source of truth.
 
 Wake paths are per harness; the protocol is shared.
 
@@ -361,8 +381,9 @@ Chosen design (implemented; the live run is pending, plan Task 17):
 
 - agy starts `tandem watch --as <role> --detach` itself via `run_command`. `--detach` double-forks out
   of the tool call in place of the probes' `nohup … &`, so the command has no shell metacharacters;
-  the tandem `PreToolUse` hook forces the bypass and `unsandboxed(tandem)` approves it, so it never
-  prompts.
+  the tandem `PreToolUse` hook forces the bypass and `unsandboxed(tandem watch)` approves it, so it
+  never prompts. Under the fallback and driver profiles (no sandbox) the hook passes it through and
+  `command(tandem watch)` approves it.
 - A `SessionStart` hook injects a system message naming agy's role, the exact watcher command when no
   live watcher holds the pidfile, and any pending mail, so the model doesn't have to remember it from
   the protocol.
@@ -465,26 +486,40 @@ user's own config stays untouched.
     "toolPermission": "proceed-in-sandbox",
     "enableTerminalSandbox": true,
     "permissions": {
-      "allow": ["unsandboxed(go test)", "unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)",
-                "unsandboxed(tandem)"],
+      "allow": ["unsandboxed(tandem send)", "unsandboxed(tandem recv)", "unsandboxed(tandem status)",
+                "unsandboxed(tandem log)", "unsandboxed(tandem watch)",
+                "unsandboxed(go test)", "unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)"],
       "deny": ["write_file(*)"]
     }
   }
   ```
 
   Commands run in the sandbox with no prompts (no network, nothing outside the workspace); tests
-  and `tandem` run on the host for real. The test prefixes are per project: tandem derives them from
-  the repo (`go.mod` → `go test`, `dip.yml` → `dip rspec`, ...) or takes `--test-cmd` at `init`.
+  and the protocol's tandem subcommands run on the host for real. The test prefixes are per
+  project: tandem derives them from the repo (`go.mod` → `go test`, `dip.yml` → `dip rspec`, ...)
+  or takes `--test-cmd` at `init`. Caveat: a test prefix takes any arguments, and some of them write
+  on the host or run other programs there (`go test -exec 'sh -c …'`, `-o <path>`,
+  `-coverprofile=<path>`), so the navigator's read-only rule holds for its test runs only as far as
+  the driver's `git status` check (`docs/backlog/test-prefix-bypass-takes-any-arguments.md`).
 - **The tandem `PreToolUse` hook** decides each `run_command` call, in this order:
-  1. a test prefix or `tandem` as one plain command (no `;`, `&`, `|`, redirect, `$` or backtick
-     outside quotes; quoted text is literal, `$` and backticks inside double quotes aren't) →
-     `{"decision":"allow","overwrite":{"BypassSandbox":true}}`. An `unsandboxed` rule only approves a
-     bypass the agent asks for, and the hook alone still prompts, so both are required (verified on
-     1.5.4 and 1.5.5).
+  1. a test prefix or one of the role's tandem subcommands (`tandem send`, `recv`, `status`, `log`,
+     `watch`, and `done` for a driver) as one plain command (no `;`, `&`, `|`, redirect, `$` or
+     backtick outside quotes; quoted text is literal, `$` and backticks inside double quotes
+     aren't), matched on the command text the way agy matches rule prefixes (so `go  test` or
+     `'tandem' send` don't match, rather than force a bypass no rule approves) →
+     `{"decision":"allow","overwrite":{"BypassSandbox":true}}` under the navigator profile, the only
+     one with `unsandboxed` rules (the hook reads `enableTerminalSandbox` from
+     `peers/agy/profile.json`). An `unsandboxed` rule only approves a bypass the agent asks for, and
+     the hook alone still prompts, so both are required (verified on 1.5.4 and 1.5.5). Under the
+     fallback and driver profiles, which have no sandbox and no `unsandboxed` rules, the same
+     commands get `{"decision":"ask"}` and their `command(...)` rules approve them.
   2. **write gate**: a command that looks like a write (redirects `>`/`>>`, `tee`, `touch`, `rm`,
      `mv`, `cp`, `mkdir`, `ln`, `chmod`, `sed -i`, `perl -i`, `truncate`, `dd`, `git` subcommands
      that change the tree or refs such as `commit`, `checkout`, `reset`, `restore`, `stash`, `apply`,
-     `merge`, `rebase`, `clean`, `add`, `rm`, `mv`) → `force_ask`, a visible prompt the user answers.
+     `merge`, `rebase`, `clean`, `add`, `rm`, `mv`, `config`, `remote`, `bisect`, `format-patch`),
+     or a tandem subcommand outside the role's list (`tandem claude`, `agy`, `init`, `done`,
+     `human`, `hook`, which would start a harness or end the session) → `force_ask`, a visible
+     prompt the user answers.
      Needed because agy 1.5.5's sandbox lets shell commands write the workspace (see
      [the 1.5.5 live probe](#agy-155-live-probe-2026-11-11)). It's best effort, since writes through
      `python3 -c` or a script can't all be spotted; `git status` stays the net. It applies only
@@ -492,28 +527,33 @@ user's own config stays untouched.
      it (quoted text is literal) and every part is checked, including `$(…)`, backticks, subshells
      and each side of `;`/`&&`/`||`/`|`. `2>&1`, `>&2` and redirects to `/dev/null` aren't writes;
      `git push`, `pull` and `fetch` are gated too, and read-only forms (`git stash list`, `git tag`
-     or `git branch` listing) aren't. Rules live in `tandem/cmdline.py`.
+     or `git branch` listing, `git config --get`, `git remote -v`) aren't. Wrappers are skipped with
+     their option values (`sudo -u bob rm x` is `rm`). Rules live in `tandem/cmdline.py`.
   3. anything else → `{"decision":"ask"}`, the pass-through, which runs sandboxed with no prompt.
 - **Fallback profile** (`tandem agy --profile fallback`, or automatic when the self-check fails), for
   when `unsandboxed` rules stop working: no sandbox,
-  `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
-  `command(dip rspec)`, never `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
+  `request-review`, a tight allowlist (read-only git, the protocol's tandem subcommands such as
+  `command(tandem send)`, the exact test commands such as `command(dip rspec)`, never
+  `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
   tandem checks at startup that agy loads the navigator profile as written and switches to this
   profile if it doesn't; a version not yet verified live only warns (see the self-check under
   [Launchers](#launchers-tandem-peer-is-the-per-peer-adapter)). Every profile's `deny` also carries
   the user's global agy deny rules.
-- **Driver profile (when agy drives)**: `--mode auto`, `toolPermission: request-review`, allow
-  `command(tandem)` and `command(git)`, `deny` = the user's global agy deny (often empty), no sandbox
+- **Driver profile (when agy drives)**: `--mode auto`, `toolPermission: request-review`, allow the
+  driver's tandem subcommands (the navigator's plus `command(tandem done)`), the test commands and
+  `command(git)`, `deny` = the user's global agy deny (often empty), no sandbox
   (the driver needs network and the full toolchain; on 1.5.4 the sandbox also made the workspace
   read-only). Prompts are left only for irreversible actions, which the user wants to see anyway.
 - **Safety net for any profile**: the driver runs `git status` at each checkpoint and treats any change
   it didn't make as a navigator violation. Tests legitimately write gitignored paths (`coverage/`,
   `log/`, `tmp/`), which `git status` already ignores.
 - The doorbell never prompts: agy's `tandem watch` is started once through `run_command` with the
-  bypass forced by the hook and approved by `unsandboxed(tandem)`, and each ring is an `agentapi`
-  call from that watcher, not a tool call.
-- Claude gets a per-session settings file too: `Bash(tandem *)` allowed for both roles, and for a
-  navigator `Edit`, `Write` and `NotebookEdit` denied. Its Bash isn't write-gated yet
+  bypass forced by the hook and approved by `unsandboxed(tandem watch)` (or, without the sandbox,
+  approved by `command(tandem watch)`), and each ring is an `agentapi` call from that watcher, not a
+  tool call.
+- Claude gets a per-session settings file too: `Bash(<prefix> *)` allowed for the same prefixes
+  (the role's tandem subcommands and the test commands, so neither role prompts on a test run), and
+  for a navigator `Edit`, `Write` and `NotebookEdit` denied. Its Bash isn't write-gated yet
   (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git status` check covers it.
 
 ### Verified (2026-11-10, agy 1.5.4)
@@ -536,8 +576,8 @@ Consequence: `write_file(*)` covers only agy's file tool. The shell is a second 
 
 - **Navigator profile (sandbox)**: on 1.5.4 the sandbox made the workspace read-only, so shell
   writes failed. On 1.5.5 it doesn't, so the hook's write gate turns write-looking commands into a
-  visible prompt. Only the bypassed prefixes (tests, `tandem`) run outside the sandbox, which is why
-  the hook matches exact prefixes and never `dip` alone.
+  visible prompt. Only the bypassed prefixes (tests, the protocol's tandem subcommands) run outside
+  the sandbox, which is why the hook matches exact prefixes and never `dip` alone.
 - **Fallback profile (allowlist)**: anything unlisted prompts, so shell writes can't pass silently.
 - **Either way**, git is the safety net: the driver checks `git status` at each checkpoint and treats
   any change it didn't make as a navigator violation.
@@ -623,6 +663,11 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
 - The rules live in `tandem/templates/protocol.md`: shared rules plus one section per role and per
   peer. `tandem/protocol.py` renders them with the session's values for Claude's
   `--append-system-prompt` and agy's `.agents/rules/AGENTS.md`, so both peers get the same text.
+  The task brief is cut at 6000 UTF-8 bytes in the rendered protocol, with a note pointing at the
+  full text in `session.json`, so the protocol stays under 16 KB and agy's 24 KB rules cap holds
+  for any brief, multibyte text included.
+- A blocking wait is `tandem recv --timeout 100`: Claude's Bash tool kills a command at 120 s by
+  default, which would cut the wait off before `recv` could exit 3 and trigger the escalation.
 - Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: the
   navigator's agy sandbox only bypasses plain commands, and both harnesses' permission rules match
   the command text.
@@ -749,7 +794,8 @@ From code.claude.com/docs/en/permissions and /settings:
 
 - **Prefix rule: `Bash(tandem *)`.** A trailing ` *` also matches the bare command (`tandem`), and
   the space is part of the rule, so `tandemx` doesn't match. `Bash(tandem:*)` is an equivalent older
-  spelling; the permission dialog itself writes the space form, so tandem does too.
+  spelling; the permission dialog itself writes the space form, so tandem does too, one rule per
+  protocol subcommand (`Bash(tandem send *)`, …) rather than `Bash(tandem *)`.
 - Compound commands (`&&`, `||`, `;`, `|`, `|&`, `&`, newline) need every part allowed. A leading
   assignment of a variable outside a known-safe set stops an allow rule matching
   (`TANDEM_ROLE=x tandem send` would prompt), and a rule matches the command text, so the protocol
@@ -786,4 +832,7 @@ None blocking v0. What's left is live-only or out of scope:
    `--` before its initial prompt; agy starting the watcher and running `tandem send`/`recv` and the
    test commands with no prompt; that 1.5.5 hooks still get no `ANTIGRAVITY_LS_ADDRESS` (1.5.4: only
    the conversation id), so a hook judges a watcher by its pid alone until the watcher's own LS
-   check ends it; `--mode auto` for an agy driver; a real agy restart and `/new`.
+   check ends it; `--mode auto` for an agy driver; a real agy restart and `/new`; agy as driver and
+   on the fallback profile starting its watcher and running tandem and tests with no prompt
+   (`command(...)` rules, no forced bypass); the exact form of `ANTIGRAVITY_LS_ADDRESS`; whether
+   `PreInvocation` carries a per-turn marker.

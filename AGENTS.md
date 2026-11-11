@@ -10,15 +10,16 @@ behaviour, and update it in the same change when a decision moves.
 bin/tandem                 shim: resolves its realpath, puts the checkout on sys.path, runs tandem.cli.main()
 tandem/__init__.py         __version__ and TandemError (printed as `tandem: <msg>`, exit 1)
 tandem/__main__.py         python3 -m tandem
-tandem/cli.py              argparse, global --session, the command registry and dispatch
-tandem/paths.py            TANDEM_HOME, spool dirs, the shim path and quoted shim commands for hooks
+tandem/cli.py              argparse, global --session, the command table and dispatch
+tandem/paths.py            TANDEM_HOME, owner-only spool dirs, the shim path and quoted shim commands
 tandem/session.py          naming, init, resolution, session.json, repo pointers, the session lock,
-                           log.jsonl, pidfiles, role claims, done/summary, status, exec of a harness
+                           log.jsonl, pidfiles, role claims, done/summary, harness env and exec
 tandem/maildir.py          envelopes, id allocation, deliver (send), pop/peek (recv), rendering, log -f
 tandem/watch.py            doorbell text, rung markers; watch --once (Claude) and --detach (agy)
 tandem/cmdline.py          sh-style lexer, bypass prefix match and the navigator write gate
 tandem/hooks.py            `tandem hook <event>`: Claude's prompt log and the four agy hooks
-tandem/protocol.py         renders templates/protocol.md for a peer and role
+tandem/protocol.py         renders templates/protocol.md for a peer and role; the tandem subcommands
+                           and test prefixes each role runs unprompted (one list for every rule)
 tandem/templates/protocol.md  the protocol both peers get (shared, role and peer sections)
 tandem/launch_claude.py    `tandem claude`: settings.json, protocol, argv/env, exec
 tandem/launch_agy.py       `tandem agy`: hooks.json, rules, profiles, user deny carry-over, self-check
@@ -48,6 +49,9 @@ Conventions:
   stdout and the exit code.
 - A test that starts a detached watcher kills it in teardown and asserts none is left
   (`pgrep -fl 'tandem watch'` should be empty after a run).
+- `tandem watch --detach` has two argparse-suppressed flags, `--poll-interval` and
+  `--ls-check-interval`, for tests only: the detached watcher is a separate process, so its
+  intervals can't be patched in-process.
 
 ## How generated configs map to harness features
 
@@ -68,11 +72,28 @@ harness. Nothing goes into the target repo or the user's global config.
 - Hook commands call the shim by absolute path; agents call plain `tandem …`, because permission
   rules match the command text.
 
+## Debugging a session
+
+Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status` lists them):
+
+- `peers/<peer>/hooks.log`: one line per hook failure (`claude` or `agy`); a hook always exits 0
+  with its safe output, so this is the only trace.
+- `peers/<role>/watch.log`: the agy watcher's own log (start, rings, failed `send-message` calls,
+  exit reason); `peers/<role>/watch.pid` (`{pid, ls_address}`) and `peers/<role>/rung` (highest
+  id rung) are its state, for Claude's waiter too.
+- `peers/agy/profile.json` is the profile the last `tandem agy` launched with; the pretool hook
+  reads its `enableTerminalSandbox` to decide whether to force a bypass.
+- `log.jsonl` (`tandem log`) holds the `agy_profile` event with the self-check's verdict.
+- `$TANDEM_HOME/agy-check.json` caches the agy self-check per `agy --version`; delete it to force a
+  re-run. Add a version to `VERIFIED_AGY_VERSIONS` only after re-running the README's live probe
+  on it.
+
 ## Rules
 
 - Comments justify decisions (why a value, why a workaround, why not the obvious option). They
   never narrate code. Context that doesn't fit a comment belongs here or in README.md.
-- Deferred work goes to `docs/backlog/<slug>.md`, one file per item (frontmatter `worth`, `where`,
-  `added`; H1 title; why it was deferred). `git rm` it in the change that lands it.
+- Deferred work goes to `docs/backlog/<slug>.md`, one file per item (frontmatter `worth`, `added`
+  and, when it points at code, `where`; H1 title; why it was deferred). `git rm` it in the change
+  that lands it.
 - README.md must match the code: when behaviour changes, fix every line it contradicts. Probe
   records and rejected alternatives stay, labelled as history.
