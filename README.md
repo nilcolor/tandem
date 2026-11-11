@@ -453,7 +453,8 @@ profile with `unsandboxed(go test)` then gave:
 So the short prefix matches, `--settings` carries the rule, and the rule approves but does not force a
 bypass. agy's startup warning calls `unsandboxed(...)` rules **deprecated** and says to migrate them to
 `command(...)`, but `command(...)` rules don't bypass. `unsandboxed` is the only working mechanism today
-and may disappear in a future release.
+and may disappear in a future release. The 1.5.5 notice says such rules are ignored; whether that's
+literal is open ([Open questions](#open-questions-and-next-experiments), item 4).
 
 Implication for Ruby apps: `dip rspec` (Docker + dip) can't run in the sandbox at all, only bypassed
 (verified below).
@@ -495,17 +496,42 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
 - The skill never touches transport details. Only a thin per-peer adapter does, so peers can be
   swapped.
 
-## agy facts (1.5.4)
+## agy facts (1.5.4, config re-checked on 1.5.5)
 
-Everything in this file was verified on agy 1.5.4. 1.5.5 is installed now; its changelog doesn't
-touch the sandbox, permission rules, hooks or `agentapi`, but nothing has been re-run on it yet.
+The behaviour above (sandbox, bypass, hooks, `agentapi`) was verified on agy 1.5.4. On 1.5.5 only
+what print-mode slash commands can show without a model turn has been re-run (2026-11-11, see
+[agy 1.5.5 re-check](#agy-155-re-check-2026-11-11)); its changelog doesn't mention the sandbox,
+`unsandboxed` rules or `agentapi`.
 
 - Config: `~/.gemini/antigravity-cli/settings.json` (permissions `allow`/`deny` with `command(...)`
   rules, `trustedWorkspaces`); shared hooks in `~/.gemini/config/hooks.json`; per-workspace hooks in
   `<workspace>/.agents/hooks.json`.
 - Hook events: `SessionStart`, `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`.
-  Command hooks only, JSON on stdin and stdout, 30 s default timeout, synchronous. Docs ship in the
-  binary's builtin skill: `~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`.
+  Command hooks only, JSON on stdin and stdout, 30 s default timeout, synchronous, run via `sh -c`
+  with the directory holding `hooks.json` as cwd. Docs ship in the binary's builtin skill:
+  `~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`. Every payload carries
+  `conversationId`, `lastUserInput`, `hookEventName` and `cwd` (the agent's working directory).
+- **`hooks.json` top-level keys are hook names, not events** (verified on 1.5.5 with `-p=/hooks` and
+  `--add-dir`): `{"tandem":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"…"}]}],
+  "SessionStart":[{"command":"…"}],"PreInvocation":[…],"Stop":[…]}}` loads four handlers under the
+  name `tandem`. The same arrays with event names at the top level load **nothing**, silently.
+  `PreToolUse`/`PostToolUse` are grouped (`matcher` + `hooks`); the other events are flat lists of
+  handlers.
+- **No-op outputs** (from `hooks.md`; the protojson decoding makes a missing field its zero value):
+
+  | Hook | No-op | Why |
+  |---|---|---|
+  | `PreToolUse` | `{"decision":"ask"}` | `{}` and `"decision":""` deny (verified on 1.5.4) |
+  | `SessionStart` | `{}` | `injectSteps` is optional |
+  | `PreInvocation` | `{}` | `injectSteps` optional; `terminationBehavior` omitted or `""` proceeds to the model |
+  | `Stop` | `{}` | only `"decision":"continue"` blocks the stop; "any other value allows the agent to stop" |
+  | `PostToolUse` | `{}` | documented as the expected output |
+
+  The non-`PreToolUse` rows come from the docs, not from a live run; Task 17 exercises them.
+- **Initial prompt in interactive mode**: `-i` / `--prompt-interactive <prompt>` "runs an initial
+  prompt interactively and continues the session" (`agy --help`, 1.5.5). There is no positional
+  prompt. Launchers use `--prompt-interactive=<text>` (the `=` form, as with `-p=`). Not run live
+  yet, since it spends a model turn.
 - `--mode accept-edits|auto|plan`, `--settings <json|file>` (per session, never saved), `--sandbox`.
 - Messages typed while agy is busy are queued ("Send Immediately" queue mode exists).
 - `agy -p "/hooks"` and other read-only slash commands answer without spending a model turn.
@@ -514,13 +540,76 @@ touch the sandbox, permission rules, hooks or `agentapi`, but nothing has been r
   `{"event":"user","message":{"role":"user","content":"..."}}`. Output: `init`, `step_update`, then one
   `result` per turn. Context carries across turns.
 
+### agy 1.5.5 re-check (2026-11-11)
+
+All with print-mode slash commands (`num_turns: 0`), so no model turn was spent.
+
+- `agy --version` → `1.5.5`.
+- The navigator profile (`proceed-in-sandbox`, `enableTerminalSandbox: true`, `unsandboxed(go test)`,
+  `unsandboxed(dip rspec)`, `unsandboxed(tandem)`, deny `write_file(*)`) loads: `-p=/config
+  --output-format json` shows all three keys as written, `-p=/permissions` lists the rules at global
+  scope, and the log line `CLI settings initialized: permissions=&{Allow:[unsandboxed(go test) …]}`
+  appears. The fallback and driver profiles load the same way.
+- **`/config` and `/permissions` echo rule strings without validating them**: a profile with
+  `bogus(x)` shows `bogus(x)` too. They prove a profile parsed and replaced the global list; they
+  can't prove agy honours a rule kind. A startup self-check built on `/config` alone only catches a
+  profile agy fails to parse.
+- **`--settings` replaces `permissions.allow` and `permissions.deny` separately.** A profile without
+  a `deny` key kept the global `deny` (`command(rm -rf)` appeared in `/config`). Generated profiles
+  therefore always write both keys, so the profile stays the whole policy.
+- `--mode auto` doesn't show in `/config` (`agentMode` stays `""`), like `--sandbox`. It can only be
+  confirmed live.
+- **No `unsandboxed` warning in print mode**: nothing on stdout, stderr or `--log-file`. The warning
+  is a TUI startup notice. Its 1.5.5 text, taken from the binary's strings since it can't be
+  captured without starting the TUI:
+  - `Invalid "unsandboxed" permission rules found; they are ignored and grant nothing:` (followed
+    by the offending files and rules)
+  - `Fix: replace "unsandboxed" with "command" (e.g. command(git status)), or remove the rule. Edit the file directly or use /permissions.`
+  - `unsandboxed is no longer a valid rule, use command() instead`
+
+  On 1.5.4 the notice was read as "deprecated" and the bypass still worked. The 1.5.5 wording says
+  the rules are **ignored**, and the changelog doesn't mention the change. If that's literal, the
+  navigator's default profile no longer bypasses the sandbox on 1.5.5 and the fallback profile has
+  to become the default. Only a live run can tell (Task 17, first check).
+- The model-facing sandbox description in the 1.5.5 binary says standard sandbox mode "has full
+  read/write access to your workspace", while on 1.5.4 a sandboxed `touch` in the workspace was
+  blocked. Also live-only; if the workspace became writable, the navigator's single-writer rule
+  rests on `write_file(*)` plus the driver's `git status` check, which don't close the shell channel.
+
+### Claude Code permission rules (docs, 2026-11-11)
+
+From code.claude.com/docs/en/permissions and /settings:
+
+- **Prefix rule: `Bash(tandem *)`.** A trailing ` *` also matches the bare command (`tandem`), and
+  the space is part of the rule, so `tandemx` doesn't match. `Bash(tandem:*)` is an equivalent older
+  spelling; the permission dialog itself writes the space form, so tandem does too.
+- Compound commands (`&&`, `||`, `;`, `|`, `|&`, `&`, newline) need every part allowed. A leading
+  assignment of a variable outside a known-safe set stops an allow rule matching
+  (`TANDEM_ROLE=x tandem send` would prompt), and a rule matches the command text, so the protocol
+  tells agents to call plain `tandem …`, not the shim by absolute path.
+- A bare tool name in `deny` (`"Edit"`, `"Write"`, `"NotebookEdit"`) removes the tool from Claude's
+  context entirely, which is what the navigator wants. Deny beats allow at every level.
+- `--settings` sits above user, project and local settings, and **lists merge across scopes**
+  (unlike agy): the user's own allow rules still apply inside a tandem session, and the navigator's
+  deny rules can't be undone by them.
+
 ## Open questions and next experiments
 
-None blocking. Small items to settle while building v0:
+None blocking the code. Settle while building v0:
 
 1. Whether agy's `lastUserInput` on `PreInvocation` distinguishes a human prompt from a
    `send-message` doorbell (both start a turn). The human-input log hook must not record doorbells
    as human messages.
 2. Whether `plan` mode blocks running tests (low priority: the sandbox does the read-only job).
-3. Re-check the navigator profile on agy 1.5.5 without a model turn (`-p=/config`, `-p=/hooks`),
-   including whether `unsandboxed(...)` is still only deprecated, not removed.
+3. ~~Re-check the navigator profile on agy 1.5.5 without a model turn~~: done, see
+   [agy 1.5.5 re-check](#agy-155-re-check-2026-11-11). The profile loads, but print mode can't show
+   whether `unsandboxed(...)` still works, which became item 4.
+4. **Does agy 1.5.5 still honour `unsandboxed(...)`?** Its startup notice says the rules are
+   "ignored and grant nothing". First live check in Task 17: the navigator profile running
+   `tandem status` with the hook forcing `BypassSandbox`. If it prompts, make the fallback profile
+   the default and keep the sandboxed one behind `--profile`.
+5. **Is the workspace still read-only inside the 1.5.5 sandbox?** Live check in Task 17: sandboxed
+   `touch` in the repo. If it's writable, the sandboxed navigator profile loses its main guarantee.
+6. What the `tandem agy` self-check can test. `/config` doesn't validate rule kinds, so it can only
+   confirm the profile parses. The honest signal is the agy version: record versions where Task 17
+   passed and treat any other version as unverified (warn, or fall back).
