@@ -1,0 +1,288 @@
+import unittest
+
+from tandem import cmdline
+from tandem.cmdline import REDIR, SEP, WORD
+
+PREFIXES = ["go test", "dip rspec", "bundle exec rspec", "tandem"]
+
+
+def words(text):
+    toks, _ = cmdline.tokens(text)
+    return [v for k, v in toks if k == WORD]
+
+
+class TokensTest(unittest.TestCase):
+    def test_plain_words(self):
+        self.assertEqual(cmdline.tokens("go  test\t./..."), ([(WORD, "go"), (WORD, "test"), (WORD, "./...")], False))
+
+    def test_single_quotes_are_literal(self):
+        body = "a; b && c | d > e < f $(g) `h` \\ \" ( )\nsecond line"
+        toks, expands = cmdline.tokens("tandem send '%s'" % body)
+        self.assertEqual(toks, [(WORD, "tandem"), (WORD, "send"), (WORD, body)])
+        self.assertFalse(expands)
+
+    def test_adjacent_quotes_join_one_word(self):
+        self.assertEqual(words("'don'\\''t' \"x\"'y'z"), ["don't", "xyz"])
+
+    def test_empty_quotes_are_a_word(self):
+        self.assertEqual(words("a '' \"\""), ["a", "", ""])
+
+    def test_double_quotes(self):
+        toks, expands = cmdline.tokens('echo "a; b | c > d"')
+        self.assertEqual(toks, [(WORD, "echo"), (WORD, "a; b | c > d")])
+        self.assertFalse(expands)
+
+    def test_double_quote_escapes(self):
+        toks, expands = cmdline.tokens(r'echo "a \$HOME \" \\ \x"')
+        self.assertEqual(toks, [(WORD, "echo"), (WORD, 'a $HOME " \\ \\x')])
+        self.assertFalse(expands)
+
+    def test_expansion_in_double_quotes(self):
+        for text in ('echo "$HOME"', 'echo "${X}"', 'echo "`id`"', 'echo "$(id)"'):
+            self.assertTrue(cmdline.tokens(text)[1], text)
+
+    def test_unquoted_expansion(self):
+        for text in ("echo $HOME", "echo `id`", "echo $(id)", "cat <(ls)", "tee >(cat)"):
+            self.assertTrue(cmdline.tokens(text)[1], text)
+
+    def test_backslash_escapes_outside_quotes(self):
+        toks, expands = cmdline.tokens(r"echo a\;b \$x \|")
+        self.assertEqual(toks, [(WORD, "echo"), (WORD, "a;b"), (WORD, "$x"), (WORD, "|")])
+        self.assertFalse(expands)
+
+    def test_line_continuation(self):
+        self.assertEqual(words("go \\\ntest"), ["go", "test"])
+
+    def test_separators(self):
+        toks, _ = cmdline.tokens("a; b && c || d | e |& f & g\nh")
+        self.assertEqual(
+            [v for k, v in toks if k == SEP], [";", "&&", "||", "|", "|&", "&", "\n"]
+        )
+
+    def test_redirects(self):
+        toks, _ = cmdline.tokens("a > b >> c 2>&1 &> d &>> e < f << g <<< h <> i >| j 2>k")
+        self.assertEqual(
+            [v for k, v in toks if k == REDIR],
+            [">", ">>", "2>&", "&>", "&>>", "<", "<<", "<<<", "<>", ">|", "2>"],
+        )
+
+    def test_comment_is_skipped(self):
+        self.assertEqual(words("ls # rm -rf x"), ["ls"])
+        self.assertEqual(words("echo a#b"), ["echo", "a#b"])
+
+    def test_unterminated_quotes(self):
+        for text in ("echo 'abc", 'echo "abc', 'echo "$(ls)'):
+            with self.assertRaises(cmdline.Unreadable):
+                cmdline.tokens(text)
+
+
+class BypassTest(unittest.TestCase):
+    def check(self, text, prefixes=PREFIXES):
+        return cmdline.bypass_prefix(text, prefixes)
+
+    def test_each_prefix(self):
+        self.assertEqual(self.check("go test ./..."), "go test")
+        self.assertEqual(self.check("dip rspec spec/models"), "dip rspec")
+        self.assertEqual(self.check("bundle exec rspec"), "bundle exec rspec")
+        self.assertEqual(self.check("tandem"), "tandem")
+        self.assertEqual(self.check("tandem recv"), "tandem")
+
+    def test_extra_whitespace_and_trailing_newline(self):
+        self.assertEqual(self.check("  go   test\t-run X ./...\n"), "go test")
+
+    def test_word_boundary(self):
+        for text in ("tandemx status", "go testing", "gotest", "dip rspecs", "dip", "go", "bundle exec"):
+            self.assertIsNone(self.check(text), text)
+
+    def test_prefix_must_lead(self):
+        for text in ("echo tandem", "TANDEM_ROLE=driver tandem send x", "env tandem status", "/usr/bin/tandem status"):
+            self.assertIsNone(self.check(text), text)
+
+    def test_quoted_prefix_word_still_matches(self):
+        self.assertEqual(self.check("'tandem' status"), "tandem")
+
+    def test_single_quoted_multi_line_body(self):
+        text = "tandem send --to driver --type review 'CHANGES\n- a; b && c | d > e $(f) `g`\n- (h)'"
+        self.assertEqual(self.check(text), "tandem")
+
+    def test_double_quoted_literal_body(self):
+        self.assertEqual(self.check('tandem send "looks good; ship it"'), "tandem")
+
+    def test_double_quoted_expansion(self):
+        self.assertIsNone(self.check('tandem send "$(cat /etc/passwd)"'))
+        self.assertIsNone(self.check('tandem send "hi $USER"'))
+        self.assertIsNone(self.check('tandem send "`id`"'))
+
+    def test_escaped_metacharacter_is_literal(self):
+        self.assertEqual(self.check("tandem send 'don'\\''t do that'"), "tandem")
+        self.assertEqual(self.check("tandem send a\\;b"), "tandem")
+
+    def test_compound_commands(self):
+        for text in (
+            "go test ./... && rm -rf x",
+            "go test ./...; rm -rf x",
+            "go test ./... || true",
+            "tandem status | cat",
+            "tandem status & rm x",
+            "tandem status\nrm x",
+            "cd sub && go test ./...",
+            "(go test ./...)",
+        ):
+            self.assertIsNone(self.check(text), text)
+
+    def test_redirects(self):
+        for text in ("go test ./... > out.txt", "tandem status 2>&1", "tandem send < body.md", "go test >/dev/null"):
+            self.assertIsNone(self.check(text), text)
+
+    def test_substitutions(self):
+        for text in ("tandem send $(cat f)", "tandem send `cat f`", "tandem send $BODY", "go test $(go list ./...)"):
+            self.assertIsNone(self.check(text), text)
+
+    def test_unreadable(self):
+        self.assertIsNone(self.check("tandem send 'unterminated"))
+
+    def test_empty(self):
+        self.assertIsNone(self.check(""))
+        self.assertIsNone(self.check("   "))
+
+    def test_bad_prefix_skipped(self):
+        self.assertEqual(self.check("tandem status", ["go 'test", "", "tandem"]), "tandem")
+
+
+class WriteGateTest(unittest.TestCase):
+    def reason(self, text):
+        return cmdline.write_reason(text)
+
+    def test_writers(self):
+        for name in sorted(cmdline.WRITERS):
+            self.assertEqual(self.reason("%s some/path" % name), name)
+
+    def test_writer_by_path_and_after_assignment(self):
+        self.assertEqual(self.reason("/bin/rm -f x"), "rm")
+        self.assertEqual(self.reason("LC_ALL=C touch x"), "touch")
+
+    def test_wrappers(self):
+        self.assertEqual(self.reason("xargs -0 rm"), "rm")
+        self.assertEqual(self.reason("env -i FOO=1 mv a b"), "mv")
+        self.assertEqual(self.reason("timeout 5 cp a b"), "cp")
+        self.assertEqual(self.reason("nohup tee log"), "tee")
+        self.assertEqual(self.reason("! touch x"), "touch")
+
+    def test_each_segment(self):
+        self.assertEqual(self.reason("ls; touch x"), "touch")
+        self.assertEqual(self.reason("ls && mkdir d"), "mkdir")
+        self.assertEqual(self.reason("false || rm x"), "rm")
+        self.assertEqual(self.reason("git log | tee out"), "tee")
+        self.assertEqual(self.reason("ls\nrm x"), "rm")
+        self.assertEqual(self.reason("sleep 1 & rm x"), "rm")
+
+    def test_substitutions_and_subshells(self):
+        self.assertEqual(self.reason("echo $(touch x)"), "touch")
+        self.assertEqual(self.reason('echo "$(rm -rf y)"'), "rm")
+        self.assertEqual(self.reason("echo `ln -s a b`"), "ln")
+        self.assertEqual(self.reason("(cd sub; chmod +x f)"), "chmod")
+        self.assertEqual(self.reason("{ ls; rmdir d; }"), "rmdir")
+
+    def test_quoted_text_is_not_a_command(self):
+        for text in ("echo 'rm -rf x'", 'echo "touch a; mv b"', "grep -n 'git commit' README.md", "echo rm"):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_output_redirects(self):
+        self.assertEqual(self.reason("echo hi > notes.txt"), "redirect > notes.txt")
+        self.assertEqual(self.reason("echo hi >>notes.txt"), "redirect >> notes.txt")
+        self.assertEqual(self.reason("ls 2> err.log"), "redirect 2> err.log")
+        self.assertEqual(self.reason("ls &> all.log"), "redirect &> all.log")
+        self.assertEqual(self.reason("ls >| f"), "redirect >| f")
+        self.assertEqual(self.reason("cat <> f"), "redirect <> f")
+        self.assertEqual(self.reason("ls >&out.log"), "redirect >& out.log")
+        self.assertEqual(self.reason("cat <<EOF > f\nhello\nEOF"), "redirect > f")
+
+    def test_harmless_redirects(self):
+        for text in (
+            "go vet ./... 2>&1",
+            "ls >/dev/null",
+            "ls 2>/dev/null",
+            "ls > /dev/null 2>&1",
+            "ls &>/dev/null",
+            "echo x >&2",
+            "ls 1>&-",
+            "wc -l < f",
+            "cat <<< text",
+            "echo 'a > b'",
+            "echo a\\>b",
+        ):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_sed_in_place(self):
+        for text in ("sed -i s/a/b/ f", "sed -i.bak s/a/b/ f", "sed -ni p f", "sed -E -i '' s/a/b/ f",
+                     "sed --in-place s/a/b/ f", "sed --in-place=.bak s/a/b/ f", "sed s/a/b/ -i f"):
+            self.assertEqual(self.reason(text), "sed -i", text)
+
+    def test_sed_without_in_place(self):
+        for text in ("sed -n 1,5p f", "sed -e s/-i// f", "sed -E 's/x/y/' f", "sed -f script.sed f", "sed -f -i f"):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_perl_in_place(self):
+        for text in ("perl -pi -e s/a/b/ f", "perl -i.bak -pe 1 f", "perl -i -pe 1 f"):
+            self.assertEqual(self.reason(text), "perl -i", text)
+
+    def test_perl_without_in_place(self):
+        for text in ("perl -Ilib -e 1", "perl -ne print f", "perl -e -i", "perl -le 'print 1'"):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_git_writers(self):
+        for sub in sorted(cmdline.GIT_WRITERS):
+            self.assertEqual(self.reason("git %s something" % sub), "git %s" % sub, sub)
+
+    def test_git_global_options(self):
+        self.assertEqual(self.reason("git -C /repo commit -m x"), "git commit")
+        self.assertEqual(self.reason("git -c user.name=x --no-pager reset --hard"), "git reset")
+        self.assertEqual(self.reason("git --git-dir=.git checkout main"), "git checkout")
+        self.assertIsNone(self.reason("git -C /repo status"))
+
+    def test_git_read_only(self):
+        for text in (
+            "git status",
+            "git diff HEAD~1",
+            "git log --oneline",
+            "git show abc123",
+            "git blame f",
+            "git grep commit",
+            "git rev-parse HEAD",
+            "git stash list",
+            "git stash show -p",
+            "git tag",
+            "git tag -l 'v*'",
+            "git branch",
+            "git branch -a -v",
+            "git branch --list 'feat*'",
+            "git branch --contains abc123",
+            "git",
+            "git --version",
+        ):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_git_ref_changing_forms(self):
+        self.assertEqual(self.reason("git stash"), "git stash")
+        self.assertEqual(self.reason("git stash pop"), "git stash")
+        self.assertEqual(self.reason("git tag v1.0"), "git tag")
+        self.assertEqual(self.reason("git tag -d v1.0"), "git tag")
+        self.assertEqual(self.reason("git branch new-feature"), "git branch")
+        self.assertEqual(self.reason("git branch -D old"), "git branch")
+        self.assertEqual(self.reason("git branch --set-upstream-to=origin/main"), "git branch")
+
+    def test_find(self):
+        self.assertEqual(self.reason("find . -name '*.orig' -delete"), "find")
+        self.assertEqual(self.reason("find . -name x -exec rm {} ;"), "find")
+        self.assertIsNone(self.reason("find . -name '*.go' -exec grep -l x {} +"))
+
+    def test_reads_pass(self):
+        for text in ("ls -la", "cat README.md", "grep -rn foo .", "go vet ./...", "python3 -c 'print(1)'", "", "   "):
+            self.assertIsNone(self.reason(text), text)
+
+    def test_unreadable_is_not_flagged(self):
+        self.assertIsNone(self.reason("echo 'unterminated"))
+
+
+if __name__ == "__main__":
+    unittest.main()

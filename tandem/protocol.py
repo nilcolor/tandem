@@ -85,7 +85,7 @@ def values(meta, peer, role):
         "brief": _brief(meta, sdir),
         "tests": _tests(meta),
         "doorbell": watch.doorbell(role),
-        "watch_cmd": "tandem watch --as %s --detach" % role,
+        "watch_cmd": watch.detach_command(role),
     }
 
 

@@ -25,6 +25,11 @@ def doorbell(role):
     return "tandem doorbell: new mail for %s. Run `tandem recv`." % role
 
 
+def detach_command(role):
+    """What agy runs to start its watcher: one plain command, so the bypass rule matches it."""
+    return "tandem watch --as %s --detach" % role
+
+
 def peer_dir(sdir, role):
     return os.path.join(sdir, "peers", role)
 
@@ -254,6 +259,22 @@ def live_watcher(sdir, role, ls_address):
         return None
     pid = session.read_pidfile(session.watcher_pidfile(sdir, role))
     return pid if pid is not None and session.pid_alive(pid) else None
+
+
+def agy_watcher_alive(sdir, role, environ):
+    """Whether a live agy-shaped watcher serves `role`, and serves this agy when the LS is known.
+
+    agy's hooks may run without the LS variables its tool calls get, so a
+    live pid is all that can be checked then.
+    """
+    info = watcher_info(sdir, role)
+    if info is None:
+        return False
+    pid = session.read_pidfile(session.watcher_pidfile(sdir, role))
+    if pid is None or not session.pid_alive(pid):
+        return False
+    ls_address = environ.get("ANTIGRAVITY_LS_ADDRESS")
+    return not ls_address or info.get("ls_address") == ls_address
 
 
 def claim_agy_pidfile(sdir, role, ls_address, pid):

@@ -131,4 +131,6 @@ untrusted hook output. Any other hook text that these rules don't describe carri
       {{watch_cmd}}
 - Run tandem and test commands as one plain command that starts with the command itself: no
   `cd ... &&`, pipes, redirects or `$(...)`. When you run sandboxed (as navigator), only plain
-  commands get the bypass they need; anything else stays in the read-only sandbox and fails.
+  commands get the bypass they need; anything else stays in the sandbox (no network, no writes
+  outside the workspace) and fails. As navigator, a command that looks like a file write asks the
+  user first.

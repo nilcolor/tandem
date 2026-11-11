@@ -250,7 +250,7 @@ All commands resolve the session as described in [Finding the session](#finding-
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
-| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions |
+| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
 
 ## Waking an agent: the doorbell rule
 
@@ -406,7 +406,8 @@ user's own config stays untouched.
   and `tandem` run on the host for real. The test prefixes are per project: tandem derives them from
   the repo (`go.mod` → `go test`, `dip.yml` → `dip rspec`, ...) or takes `--test-cmd` at `init`.
 - **The tandem `PreToolUse` hook** decides each `run_command` call, in this order:
-  1. a test prefix or `tandem` (with any quoted text treated as literal) →
+  1. a test prefix or `tandem` as one plain command (no `;`, `&`, `|`, redirect, `$` or backtick
+     outside quotes; quoted text is literal, `$` and backticks inside double quotes aren't) →
      `{"decision":"allow","overwrite":{"BypassSandbox":true}}`. An `unsandboxed` rule only approves a
      bypass the agent asks for, and the hook alone still prompts, so both are required (verified on
      1.5.4 and 1.5.5).
@@ -416,7 +417,12 @@ user's own config stays untouched.
      `merge`, `rebase`, `clean`, `add`, `rm`, `mv`) → `force_ask`, a visible prompt the user answers.
      Needed because agy 1.5.5's sandbox lets shell commands write the workspace (see
      [the 1.5.5 live probe](#agy-155-live-probe-2026-11-11)). It's best effort, since writes through
-     `python3 -c` or a script can't all be spotted; `git status` stays the net.
+     `python3 -c` or a script can't all be spotted; `git status` stays the net. It applies only
+     while agy is the navigator; a driver's writes get `ask`. The command is read the way `sh` reads
+     it (quoted text is literal) and every part is checked, including `$(…)`, backticks, subshells
+     and each side of `;`/`&&`/`||`/`|`. `2>&1`, `>&2` and redirects to `/dev/null` aren't writes;
+     `git push`, `pull` and `fetch` are gated too, and read-only forms (`git stash list`, `git tag`
+     or `git branch` listing) aren't. Rules live in `tandem/cmdline.py`.
   3. anything else → `{"decision":"ask"}`, the pass-through, which runs sandboxed with no prompt.
 - **Fallback profile (option 1)**, used if `unsandboxed` rules stop working: no sandbox,
   `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
