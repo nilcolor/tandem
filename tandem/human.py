@@ -8,7 +8,6 @@ from tandem import TandemError, maildir, session
 
 TICK = 1.0
 SENDER = "human"
-TARGETS = ("driver", "navigator")
 
 HELP = """\
   @driver <text>        send to the driver (bare text does the same)
@@ -46,7 +45,7 @@ def parse_line(line):
     role = m.group(1).lower()
     if role == SENDER:
         raise TandemError("cannot send to yourself (human)")
-    if role not in TARGETS:
+    if role not in session.PAIR_ROLES:
         # A typo'd role must not fall through to the driver as bare text.
         raise TandemError("unknown role @%s: use @driver or @navigator" % m.group(1))
     type = m.group(2)
@@ -86,19 +85,6 @@ def choose_reply(sdir, cmd):
     return cmd.type, None
 
 
-class StreamLines:
-    """Line source over a file object without a descriptor (tests, in-process CLI runs)."""
-
-    def __init__(self, stream):
-        self._stream = stream
-
-    def poll(self, timeout):
-        line = self._stream.readline()
-        if not line:
-            return None
-        return [line.rstrip("\r\n")]
-
-
 class FdLines:
     """Line source over a file descriptor: waits up to `timeout` for input.
 
@@ -133,14 +119,6 @@ def _decode(raw):
     return raw.decode("utf-8", "replace").rstrip("\r")
 
 
-def stdin_source(stream):
-    try:
-        fd = stream.fileno()
-    except (AttributeError, OSError, ValueError):
-        return StreamLines(stream)
-    return FdLines(fd)
-
-
 class Repl:
     def __init__(self, meta, source, out=None, err=None):
         self.dir = meta["dir"]
@@ -164,17 +142,21 @@ class Repl:
         return meta
 
     def banner(self, meta):
-        roles = meta.get("roles") or {}
-        peers = ", ".join("%s %s" % (r, roles[r]) for r in TARGETS if r in roles)
+        peers = ", ".join("%s %s" % (r, meta["roles"][r]) for r in session.PAIR_ROLES)
         return "tandem human: session %s (%s)\n%s" % (self.dir, peers, HELP)
 
     def show_mail(self):
         while True:
-            msg = maildir.pop(self.sdir, SENDER)
+            try:
+                msg = maildir.pop(self.sdir, SENDER)
+            except TandemError as exc:
+                # pop has set the bad file aside, so the next pop reads the next message.
+                self.complain(exc)
+                continue
             if msg is None:
                 return
             text = maildir.render(msg)
-            if msg.get("expects_reply") and msg.get("from") in TARGETS:
+            if msg.get("expects_reply") and msg.get("from") in session.PAIR_ROLES:
                 text += "\n(reply: @%s <text>)" % msg["from"]
             self.say("\n" + text + "\n")
 
@@ -237,12 +219,12 @@ def run(meta, source, out=None, err=None, tick=TICK):
     return 0
 
 
-def configure_human(p):
-    pass
-
-
 def run_human(args):
     meta = session.resolve_args(args)
     if not session.is_active(meta):
         raise TandemError("session %s has ended" % meta["dir"])
-    return run(meta, stdin_source(sys.stdin))
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        raise TandemError("tandem human reads a terminal or a pipe on stdin")
+    return run(meta, FdLines(fd))

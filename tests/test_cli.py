@@ -1,8 +1,10 @@
 import os
+import stat
 import subprocess
 import sys
+from unittest import mock
 
-from tandem import TandemError, __version__, cli, paths
+from tandem import TandemError, __version__, cli, maildir, paths, session
 from tests.helpers import SHIM, TandemTestCase
 
 
@@ -39,14 +41,11 @@ class ShimTest(TandemTestCase):
 
 
 class CliTest(TandemTestCase):
-    def setUp(self):
-        super().setUp()
-        saved = list(cli.COMMANDS)
-
-        def restore():
-            cli.COMMANDS[:] = saved
-
-        self.addCleanup(restore)
+    def probe(self, configure, run):
+        """Add a `probe` command for the rest of the test."""
+        patcher = mock.patch.object(cli, "COMMANDS", cli.COMMANDS + (("probe", "test command", configure, run),))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_unknown_subcommand_exits_1(self):
         code, out, err = self.run_cli("no-such-command")
@@ -60,7 +59,7 @@ class CliTest(TandemTestCase):
         self.assertTrue(err.startswith("tandem: "), err)
 
     def test_bad_option_on_subcommand_exits_1(self):
-        cli.register("probe", "test command", lambda p: None, lambda a: 0)
+        self.probe(lambda p: None, lambda a: 0)
         code, _, err = self.run_cli("probe", "--bogus")
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("tandem: "), err)
@@ -81,32 +80,47 @@ class CliTest(TandemTestCase):
             seen["flag"] = args.flag
             return 3
 
-        cli.register("probe", "test command", configure, run)
+        self.probe(configure, run)
         code, _, _ = self.run_cli("--session", "repo--x", "probe", "--flag")
         self.assertEqual(code, 3)
         self.assertEqual(seen, {"session": "repo--x", "flag": True})
 
     def test_command_returning_none_exits_0(self):
-        cli.register("probe", "test command", lambda p: None, lambda a: None)
+        self.probe(lambda p: None, lambda a: None)
         self.assertEqual(self.run_cli("probe")[0], 0)
 
     def test_tandem_error_prints_prefixed_message_and_exits_1(self):
         def run(args):
             raise TandemError("no active session")
 
-        cli.register("probe", "test command", lambda p: None, run)
+        self.probe(lambda p: None, run)
         code, out, err = self.run_cli("probe")
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertEqual(err, "tandem: no active session\n")
 
-    def test_duplicate_registration_rejected(self):
-        cli.register("probe", "test command", lambda p: None, lambda a: 0)
-        with self.assertRaises(ValueError):
-            cli.register("probe", "again", lambda p: None, lambda a: 0)
+    def test_command_without_options(self):
+        self.probe(None, lambda a: 4)
+        self.assertEqual(self.run_cli("probe")[0], 4)
+        self.assertEqual(self.run_cli("probe", "--bogus")[0], 1)
+
+    def test_ctrl_c_exits_130_without_a_traceback(self):
+        repo = self.make_repo()
+        os.chdir(repo)
+        session.init_session(cwd=repo)
+        with mock.patch.object(maildir, "receive", side_effect=KeyboardInterrupt):
+            code, out, err = self.run_cli("recv", "--as", "driver", "--wait")
+        self.assertEqual((code, out), (130, ""))
+        self.assertNotIn("Traceback", err)
 
 
 class PathsTest(TandemTestCase):
+    def test_spool_is_owner_only(self):
+        repo = self.make_repo()
+        meta = session.init_session(cwd=repo)
+        for path in (self.tandem_home, paths.sessions_dir(), session.session_path(meta["dir"]), paths.repos_dir()):
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700, path)
+
     def test_tandem_home_override(self):
         self.assertEqual(paths.tandem_home(), self.tandem_home)
 

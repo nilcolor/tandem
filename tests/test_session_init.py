@@ -384,6 +384,46 @@ class InitErrorsAndReplaceTest(InitTestCase):
         self.assertEqual(self.init_ok("second")["dir"], "repo--second")
         self.assertEqual(session.read_pointer(self.repo), "repo--second")
 
+    def test_pointer_to_unreadable_session_does_not_block(self):
+        # `tandem status` lists such a pointer as stale and says `tandem init` takes over.
+        self.init_ok()
+        for args in (("second",), ("third", "--replace")):
+            with open(os.path.join(session.session_path(session.read_pointer(self.repo)), "session.json"), "w") as f:
+                f.write("{")
+            meta = self.init_ok(*args)
+            self.assertEqual(session.read_pointer(self.repo), meta["dir"], args)
+            self.assertNotIn("replaces", self.log_lines(meta["dir"])[0])
+
+    def test_replace_keeps_old_session_changes_made_meanwhile(self):
+        self.init_ok()
+        real = session._allocate_dir
+
+        def allocate(base):
+            # Lands after init read the old session and before it marks it replaced.
+            session.claim_role("repo--first", "claude", pid=4242)
+            return real(base)
+
+        with mock.patch.object(session, "_allocate_dir", side_effect=allocate):
+            self.init_ok("second", "--replace")
+        old = session.load_session("repo--first")
+        self.assertEqual(old["claims"]["claude"]["pid"], 4242)
+        self.assertEqual(old["replaced_by"], "repo--second")
+
+    def test_replace_of_a_session_ended_meanwhile(self):
+        self.init_ok()
+        real = session._allocate_dir
+
+        def allocate(base):
+            session.end_session(session.load_session("repo--first"))
+            return real(base)
+
+        with mock.patch.object(session, "_allocate_dir", side_effect=allocate):
+            meta = self.init_ok("second", "--replace")
+        old = session.load_session("repo--first")
+        self.assertIsNone(old["replaced_by"])
+        self.assertNotIn("replaced", [e["event"] for e in self.log_lines("repo--first")])
+        self.assertNotIn("replaces", self.log_lines(meta["dir"])[0])
+
     def test_worktree_gets_its_own_session(self):
         self.init_ok()
         wt = os.path.join(self.tmp, "repo-wt")

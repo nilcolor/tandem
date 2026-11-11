@@ -29,7 +29,7 @@ so leave out `--session` and `--as`.
   `no mail` (exit 3), then act on everything you read. `tandem recv --peek` looks without consuming.
 - History and state: `tandem log`, `tandem status`.
 - After sending something that expects a reply, end your turn: the doorbell wakes you when mail
-  arrives. Don't poll in a loop. If you truly must block, run `tandem recv --timeout 300`; exit 3
+  arrives. Don't poll in a loop. If you truly must block, run `tandem recv --timeout 100`; exit 3
   means nothing came, so escalate instead of waiting again.
 
 ## The doorbell

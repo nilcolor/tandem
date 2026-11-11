@@ -7,7 +7,6 @@ on anything it can't read; the write gate is best effort.
 
 import os
 import re
-import shlex
 
 WORD, SEP, REDIR = "word", "sep", "redir"
 
@@ -18,6 +17,15 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Shell keywords and wrappers that run the word after them as the command.
 _KEYWORDS = frozenset(("!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time"))
 _WRAPPERS = frozenset(("command", "builtin", "exec", "nohup", "nice", "env", "sudo", "doas", "xargs", "timeout"))
+# Wrapper options whose value is the next word, so `sudo -u bob rm x` runs `rm`, not `bob`.
+_WRAPPER_VALUE_OPTS = {
+    "sudo": frozenset(("-u", "-g", "-h", "-p", "-C", "-D", "-R", "-r", "-t", "-T", "-U")),
+    "doas": frozenset(("-u", "-C")),
+    "nice": frozenset(("-n",)),
+    "env": frozenset(("-u", "-C")),
+    "timeout": frozenset(("-s", "-k", "--signal", "--kill-after")),
+    "xargs": frozenset(("-I", "-n", "-L", "-P", "-d", "-E", "-s", "-a")),
+}
 
 WRITERS = frozenset(
     (
@@ -25,16 +33,36 @@ WRITERS = frozenset(
         "dd", "tee", "install", "patch", "unlink", "shred", "rsync",
     )
 )
-# Subcommands that change the work tree, the index, refs or a remote. Read-only
-# forms of stash, tag and branch are told apart in _git_writes.
+# Subcommands that change the work tree, the index, refs, config or a remote, or write files.
+# Their read-only forms are told apart in _git_writes.
 GIT_WRITERS = frozenset(
     (
         "commit", "checkout", "switch", "reset", "restore", "stash", "apply", "am", "merge",
         "rebase", "cherry-pick", "revert", "clean", "add", "rm", "mv", "tag", "branch", "push",
         "pull", "fetch", "init", "clone", "worktree", "submodule", "update-ref", "update-index",
-        "gc", "prune",
+        "gc", "prune", "bisect", "remote", "notes", "replace", "symbolic-ref", "sparse-checkout",
+        "config", "format-patch",
     )
 )
+# First arguments that make a writer subcommand only read; "" stands for no arguments at all.
+_GIT_READ_FORMS = {
+    "stash": ("list", "show"),
+    "tag": ("", "-l", "--list", "-n"),
+    "bisect": ("log", "view", "visualize"),
+    "remote": ("", "-v", "--verbose", "show", "get-url"),
+    "notes": ("", "list", "show"),
+    "replace": ("", "-l", "--list"),
+    "sparse-checkout": ("list",),
+    "worktree": ("list",),
+    "config": ("-l", "--list", "--get", "--get-all", "--get-regexp", "--get-urlmatch", "get", "list"),
+}
+_GIT_CONFIG_WRITES = frozenset(
+    (
+        "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
+        "-e", "--edit", "set", "unset", "rename-section", "remove-section", "edit",
+    )
+)
+_GIT_CONFIG_VALUE_OPTS = frozenset(("-f", "--file", "--blob", "--type", "--default", "--comment"))
 _GIT_VALUE_OPTS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace"))
 _GIT_BRANCH_WRITES = frozenset(
     (
@@ -217,32 +245,25 @@ def tokens(text):
     return out, expands
 
 
-def prefix_words(prefix):
-    """A configured prefix (`go test`, `tandem`) as words; None if it doesn't parse."""
-    try:
-        words = shlex.split(prefix)
-    except ValueError:
-        return None
-    return words or None
-
-
 def bypass_prefix(text, prefixes):
     """The prefix `text` runs under, if it is one plain command starting with it; else None.
 
     Plain means no separator, redirect or expansion outside quotes: one
     command whose words are all literal, so nothing but that command can run
-    outside the sandbox. Matched on whole words, so `tandemx` isn't `tandem`.
+    outside the sandbox. The prefix is matched on the command text, the way
+    agy matches its rule prefixes, so the hook never forces a bypass that no
+    `unsandboxed(...)` rule approves; it must end at a space, so `tandem sendx`
+    isn't `tandem send`.
     """
+    text = text.strip()
     try:
-        toks, expands = tokens(text.strip())
+        toks, expands = tokens(text)
     except Unreadable:
         return None
-    if expands or any(kind != WORD for kind, _ in toks):
+    if not toks or expands or any(kind != WORD for kind, _ in toks):
         return None
-    words = [value for _, value in toks]
     for prefix in prefixes:
-        want = prefix_words(prefix)
-        if want and words[: len(want)] == want:
+        if prefix and re.match(re.escape(prefix) + r"(?:[ \t]|\Z)", text):
             return prefix
     return None
 
@@ -286,14 +307,25 @@ def _command(words):
             continue
         name = os.path.basename(w)
         if name in _WRAPPERS:
+            takes_value = _WRAPPER_VALUE_OPTS.get(name, ())
             i += 1
             while i < len(words) and (words[i].startswith("-") or _ASSIGNMENT.match(words[i])):
-                i += 1
+                i += 2 if words[i] in takes_value else 1
             if name == "timeout" and i < len(words):
                 i += 1
             continue
         return name, words[i + 1 :]
     return None, []
+
+
+def commands(text):
+    """(name, args) of each simple command in `text`, as `write_reason` sees them; [] if unreadable."""
+    try:
+        toks, _ = tokens(text)
+    except Unreadable:
+        return []
+    found = [_command(words) for words, _ in segments(toks)]
+    return [(name, args) for name, args in found if name is not None]
 
 
 def _short_flag_has(arg, letter, value_letters):
@@ -333,6 +365,18 @@ def _in_place(name, args):
     return False
 
 
+def _positional(args, value_opts=()):
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in value_opts:
+            skip = True
+        elif not a.startswith("-"):
+            out.append(a)
+    return out
+
+
 def _git_writes(args):
     i = 0
     while i < len(args):
@@ -347,10 +391,18 @@ def _git_writes(args):
         return None
     sub, rest = args[i], args[i + 1 :]
     if sub not in GIT_WRITERS:
+        if sub == "archive" and any(a in ("-o", "--output") or a.startswith("--output=") for a in rest):
+            return "git archive"
         return None
-    if sub == "stash" and rest[:1] and rest[0] in ("list", "show"):
+    if (rest[0] if rest else "") in _GIT_READ_FORMS.get(sub, ()):
         return None
-    if sub == "tag" and (not rest or rest[0] in ("-l", "--list", "-n")):
+    if sub == "format-patch" and "--stdout" in rest:
+        return None
+    if sub == "symbolic-ref" and len(_positional(rest)) < 2 and not {"-d", "--delete"} & set(rest):
+        return None
+    if sub == "config":
+        if any(a in _GIT_CONFIG_WRITES for a in rest) or len(_positional(rest, _GIT_CONFIG_VALUE_OPTS)) >= 2:
+            return "git config"
         return None
     if sub == "branch":
         if any(a in _GIT_BRANCH_WRITES or a.startswith("--set-upstream-to=") for a in rest):

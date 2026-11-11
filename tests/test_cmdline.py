@@ -3,7 +3,7 @@ import unittest
 from tandem import cmdline
 from tandem.cmdline import REDIR, SEP, WORD
 
-PREFIXES = ["go test", "dip rspec", "bundle exec rspec", "tandem"]
+PREFIXES = ["go test", "dip rspec", "bundle exec rspec", "tandem send", "tandem recv", "tandem status"]
 
 
 def words(text):
@@ -84,29 +84,37 @@ class BypassTest(unittest.TestCase):
         self.assertEqual(self.check("go test ./..."), "go test")
         self.assertEqual(self.check("dip rspec spec/models"), "dip rspec")
         self.assertEqual(self.check("bundle exec rspec"), "bundle exec rspec")
-        self.assertEqual(self.check("tandem"), "tandem")
-        self.assertEqual(self.check("tandem recv"), "tandem")
+        self.assertEqual(self.check("tandem recv"), "tandem recv")
+        self.assertEqual(self.check("tandem status"), "tandem status")
 
-    def test_extra_whitespace_and_trailing_newline(self):
-        self.assertEqual(self.check("  go   test\t-run X ./...\n"), "go test")
+    def test_surrounding_whitespace_and_trailing_newline(self):
+        self.assertEqual(self.check("  go test\t-run X ./...\n"), "go test")
+
+    def test_only_listed_subcommands(self):
+        for text in ("tandem", "tandem done", "tandem init --replace", "tandem claude -- -p x", "tandem agy"):
+            self.assertIsNone(self.check(text), text)
 
     def test_word_boundary(self):
-        for text in ("tandemx status", "go testing", "gotest", "dip rspecs", "dip", "go", "bundle exec"):
+        for text in ("tandemx status", "tandem sendx", "go testing", "gotest", "dip rspecs", "dip", "go", "bundle exec"):
             self.assertIsNone(self.check(text), text)
 
     def test_prefix_must_lead(self):
         for text in ("echo tandem", "TANDEM_ROLE=driver tandem send x", "env tandem status", "/usr/bin/tandem status"):
             self.assertIsNone(self.check(text), text)
 
-    def test_quoted_prefix_word_still_matches(self):
-        self.assertEqual(self.check("'tandem' status"), "tandem")
+    def test_matched_on_the_text_like_agy_rules(self):
+        # agy's rule prefixes compare command text, so a spelling they wouldn't match must not be
+        # forced into a bypass the rule then doesn't approve (a prompt).
+        for text in ("'tandem' status", "go  test ./...", "tandem\tsend x"):
+            self.assertIsNone(self.check(text), text)
+        self.assertEqual(self.check("go test -tags 'integration' ./...", ["go test -tags 'integration'"]), "go test -tags 'integration'")
 
     def test_single_quoted_multi_line_body(self):
         text = "tandem send --to driver --type review 'CHANGES\n- a; b && c | d > e $(f) `g`\n- (h)'"
-        self.assertEqual(self.check(text), "tandem")
+        self.assertEqual(self.check(text), "tandem send")
 
     def test_double_quoted_literal_body(self):
-        self.assertEqual(self.check('tandem send "looks good; ship it"'), "tandem")
+        self.assertEqual(self.check('tandem send "looks good; ship it"'), "tandem send")
 
     def test_double_quoted_expansion(self):
         self.assertIsNone(self.check('tandem send "$(cat /etc/passwd)"'))
@@ -114,8 +122,8 @@ class BypassTest(unittest.TestCase):
         self.assertIsNone(self.check('tandem send "`id`"'))
 
     def test_escaped_metacharacter_is_literal(self):
-        self.assertEqual(self.check("tandem send 'don'\\''t do that'"), "tandem")
-        self.assertEqual(self.check("tandem send a\\;b"), "tandem")
+        self.assertEqual(self.check("tandem send 'don'\\''t do that'"), "tandem send")
+        self.assertEqual(self.check("tandem send a\\;b"), "tandem send")
 
     def test_compound_commands(self):
         for text in (
@@ -145,8 +153,8 @@ class BypassTest(unittest.TestCase):
         self.assertIsNone(self.check(""))
         self.assertIsNone(self.check("   "))
 
-    def test_bad_prefix_skipped(self):
-        self.assertEqual(self.check("tandem status", ["go 'test", "", "tandem"]), "tandem")
+    def test_empty_prefix_skipped(self):
+        self.assertEqual(self.check("tandem status", ["", "tandem status"]), "tandem status")
 
 
 class WriteGateTest(unittest.TestCase):
@@ -167,6 +175,26 @@ class WriteGateTest(unittest.TestCase):
         self.assertEqual(self.reason("timeout 5 cp a b"), "cp")
         self.assertEqual(self.reason("nohup tee log"), "tee")
         self.assertEqual(self.reason("! touch x"), "touch")
+
+    def test_wrapper_options_with_values(self):
+        for text in (
+            "sudo -u bob rm x",
+            "sudo -g staff -u bob rm x",
+            "nice -n 5 rm x",
+            "nice -5 rm x",
+            "timeout -s KILL 5 rm x",
+            "timeout --signal KILL -k 2 5 rm x",
+            "xargs -I {} rm {}",
+            "xargs -n 1 -P 4 rm",
+            "env -u HOME rm x",
+            "doas -u root rm x",
+        ):
+            self.assertEqual(self.reason(text), "rm", text)
+
+    def test_heredoc_body_is_read_as_commands(self):
+        # Known false positive (docs/backlog/agy-write-gate-misses-indirect-writes.md): the lexer has
+        # no heredocs, so a body line starting with a writer asks needlessly.
+        self.assertEqual(self.reason("cat <<EOF\nrm x\nEOF"), "rm")
 
     def test_each_segment(self):
         self.assertEqual(self.reason("ls; touch x"), "touch")
@@ -232,7 +260,48 @@ class WriteGateTest(unittest.TestCase):
 
     def test_git_writers(self):
         for sub in sorted(cmdline.GIT_WRITERS):
-            self.assertEqual(self.reason("git %s something" % sub), "git %s" % sub, sub)
+            self.assertEqual(self.reason("git %s some thing" % sub), "git %s" % sub, sub)
+
+    def test_git_writers_added_with_their_read_forms(self):
+        writes = {
+            "git bisect start": "git bisect",
+            "git remote add origin url": "git remote",
+            "git remote set-url origin url": "git remote",
+            "git notes add -m x": "git notes",
+            "git replace a b": "git replace",
+            "git symbolic-ref HEAD refs/heads/x": "git symbolic-ref",
+            "git symbolic-ref -d HEAD": "git symbolic-ref",
+            "git sparse-checkout set dir": "git sparse-checkout",
+            "git config user.name x": "git config",
+            "git config --unset user.name": "git config",
+            "git config set user.name x": "git config",
+            "git format-patch HEAD~1": "git format-patch",
+            "git archive -o out.tar HEAD": "git archive",
+            "git archive --output=out.tar HEAD": "git archive",
+            "git worktree add ../x": "git worktree",
+        }
+        for text, reason in writes.items():
+            self.assertEqual(self.reason(text), reason, text)
+        reads = (
+            "git bisect log",
+            "git remote",
+            "git remote -v",
+            "git remote show origin",
+            "git notes",
+            "git notes show HEAD",
+            "git replace -l",
+            "git symbolic-ref HEAD",
+            "git sparse-checkout list",
+            "git config user.name",
+            "git config --get user.name",
+            "git config -l",
+            "git config --file .gitmodules submodule.x.url",
+            "git format-patch --stdout HEAD~1",
+            "git archive HEAD",
+            "git worktree list",
+        )
+        for text in reads:
+            self.assertIsNone(self.reason(text), text)
 
     def test_git_global_options(self):
         self.assertEqual(self.reason("git -C /repo commit -m x"), "git commit")

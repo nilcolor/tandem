@@ -1,28 +1,23 @@
 import argparse
 import os
 
-from tandem import TandemError, hooks, paths, protocol, session
+from tandem import hooks, paths, protocol, session
 
 PEER = "claude"
 # The waiter's deadline sits just under the hook timeout so it exits 0 on its
 # own instead of being killed by Claude.
 STOP_TIMEOUT = 14400
 WAIT_DEADLINE = 14340
-ALLOW = ["Bash(tandem *)"]
 # A bare tool name in deny removes the tool from Claude's context entirely.
 NAVIGATOR_DENY = ["Edit", "Write", "NotebookEdit"]
 
 
-def peer_dir(sdir):
-    return os.path.join(sdir, "peers", PEER)
-
-
 def settings_path(sdir):
-    return os.path.join(peer_dir(sdir), "settings.json")
+    return os.path.join(session.peer_dir(sdir, PEER), "settings.json")
 
 
 def protocol_path(sdir):
-    return os.path.join(peer_dir(sdir), "protocol.md")
+    return os.path.join(session.peer_dir(sdir, PEER), "protocol.md")
 
 
 def build_settings(meta, role):
@@ -31,7 +26,8 @@ def build_settings(meta, role):
         "--session", dir_name, "watch", "--as", role, "--once", "--deadline", str(WAIT_DEADLINE)
     )
     prompt_log = paths.shim_command("--session", dir_name, "hook", "claude-prompt")
-    permissions = {"allow": list(ALLOW)}
+    # `Bash(<prefix> *)` also matches the bare prefix, and the space keeps `tandem sendx` out.
+    permissions = {"allow": ["Bash(%s *)" % prefix for prefix in protocol.approved_prefixes(meta, role)]}
     if role == "navigator":
         permissions["deny"] = list(NAVIGATOR_DENY)
     return {
@@ -46,25 +42,20 @@ def build_settings(meta, role):
 
 
 def initial_prompt(meta, role):
-    name = meta.get("name") or session.short_name(meta["dir"])
-    if role == "driver":
-        then = "then start the intake phase as your tandem protocol describes"
-    else:
-        then = "then wait for the driver's plan: if there was no mail, say so and end your turn"
     return "%s session `%s` is up and you are the %s. Run `tandem recv` until it says no mail, %s." % (
         hooks.LAUNCHER_PREFIX,
-        name,
+        meta.get("name") or session.short_name(meta["dir"]),
         role,
-        then,
+        protocol.first_turn(role),
     )
 
 
-def prepare(meta, role=None, extra=(), pid=None, environ=None):
+def prepare(meta, role=None, extra=()):
     """Claim the role, write the session's Claude config; returns (argv, env, cwd) to exec."""
-    meta = session.claim_role(meta["dir"], PEER, role, pid=pid)
+    meta = session.claim_role(meta["dir"], PEER, role)
     role = protocol.peer_role(meta, PEER)
     sdir = session.session_path(meta["dir"])
-    os.makedirs(peer_dir(sdir), exist_ok=True)
+    os.makedirs(session.peer_dir(sdir, PEER), exist_ok=True)
     session.write_json_atomic(settings_path(sdir), build_settings(meta, role))
     text = protocol.render(meta, PEER, role)
     session.write_text_atomic(protocol_path(sdir), text)
@@ -75,10 +66,7 @@ def prepare(meta, role=None, extra=(), pid=None, environ=None):
     argv = ["claude", "--add-dir", sdir, "--settings", settings_path(sdir), "--append-system-prompt", text]
     argv += list(extra)
     argv += ["--", initial_prompt(meta, role)]
-    env = dict(os.environ if environ is None else environ)
-    env["TANDEM_SESSION"] = meta["dir"]
-    env["TANDEM_ROLE"] = role
-    return argv, env, meta["repo"]
+    return argv, session.harness_env(meta, role), meta["repo"]
 
 
 def configure_claude(p):
@@ -86,17 +74,8 @@ def configure_claude(p):
     p.add_argument("extra", nargs=argparse.REMAINDER, help="after --: arguments passed to claude as they are")
 
 
-def _extra(args):
-    extra = list(args.extra or [])
-    if extra and extra[0] == "--":
-        extra = extra[1:]
-    elif extra:
-        raise TandemError("pass claude's own arguments after --, e.g. `tandem claude -- --model opus`")
-    return extra
-
-
 def run_claude(args, exec_fn=None):
-    extra = _extra(args)
+    extra = session.harness_extra(args, "tandem claude -- --model opus")
     meta = session.resolve_args(args)
     argv, env, cwd = prepare(meta, args.role, extra)
     (exec_fn or session.exec_harness)(argv, env, cwd)

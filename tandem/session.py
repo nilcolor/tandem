@@ -22,6 +22,17 @@ TEST_PREFIXES = (
 )
 
 
+def seconds(text, flag, positive=False):
+    """A command-line duration in seconds; TandemError for anything but a non-negative number."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise TandemError("%s must be a number of seconds, not %r" % (flag, text))
+    if value != value or value < 0 or (positive and value == 0):
+        raise TandemError("%s must %s" % (flag, "be positive" if positive else "not be negative"))
+    return value
+
+
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
 
@@ -30,12 +41,12 @@ def iso(dt):
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def sanitize(text, cap=NAME_CAP):
+def sanitize(text):
     # NFKD first so accented names keep their letters ("Café" → "cafe")
     # instead of losing them to the [a-z0-9] filter.
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
-    return slug[:cap].rstrip("-")
+    return slug[:NAME_CAP].rstrip("-")
 
 
 def _git(cwd, *args):
@@ -94,6 +105,11 @@ def session_path(dir_name):
     return os.path.join(paths.sessions_dir(), dir_name)
 
 
+def peer_dir(sdir, name):
+    """`peers/<name>/` of a session: a peer's generated config, or a role's watcher state."""
+    return os.path.join(sdir, "peers", name)
+
+
 def load_session(dir_name):
     """session.json of `dir_name`, or None when the session doesn't exist."""
     path = os.path.join(session_path(dir_name), "session.json")
@@ -141,7 +157,7 @@ def read_pointer(top):
 
 def write_pointer(top, dir_name):
     pdir = repo_pointer_dir(top)
-    os.makedirs(pdir, exist_ok=True)
+    paths.make_private_dir(pdir)
     write_text_atomic(os.path.join(pdir, "path"), top + "\n")
     write_text_atomic(os.path.join(pdir, "current"), dir_name + "\n")
 
@@ -203,11 +219,15 @@ def write_log_line(sdir, record):
         f.write(line)
 
 
-def log_event(sdir, event, **fields):
-    record = {"kind": "event", "ts": iso(_now()), "event": event}
+def event_record(event, ts=None, **fields):
+    record = {"kind": "event", "ts": ts or iso(_now()), "event": event}
     record.update(fields)
+    return record
+
+
+def log_event(sdir, event, **fields):
     with locked(sdir):
-        write_log_line(sdir, record)
+        write_log_line(sdir, event_record(event, **fields))
 
 
 def log_lines(sdir, offset=0):
@@ -245,22 +265,24 @@ def read_log(sdir):
 
 
 def watcher_pidfile(sdir, role):
-    return os.path.join(sdir, "peers", role, "watch.pid")
+    return os.path.join(peer_dir(sdir, role), "watch.pid")
 
 
-def read_pidfile(path):
-    """The pid a watcher pidfile names, or None when it is missing or unreadable.
+def valid_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    Claude's waiter writes a bare pid, agy's loop `{"pid": …, "ls_address": …}`.
+
+def read_watcher(sdir, role):
+    """The role's watcher pidfile, `{"pid": …, "ls_address": …}`, or None when missing or unreadable.
+
+    `ls_address` is the agy language server a detached watcher serves; Claude's waiter has none.
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(watcher_pidfile(sdir, role), encoding="utf-8") as f:
             value = json.loads(f.read())
     except (OSError, ValueError):
         return None
-    if isinstance(value, dict):
-        value = value.get("pid")
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if not isinstance(value, dict) or not valid_pid(value.get("pid")):
         return None
     return value
 
@@ -277,12 +299,12 @@ def pid_alive(pid):
 
 def _allocate_dir(base):
     """Create `sessions/<base>` (or `<base>-2`, `-3`, …) atomically; returns the dir name."""
-    os.makedirs(paths.sessions_dir(), exist_ok=True)
+    paths.make_private_dir(paths.sessions_dir())
     n = 1
     while True:
         dir_name = base if n == 1 else "%s-%d" % (base, n)
         try:
-            os.mkdir(session_path(dir_name))
+            os.mkdir(session_path(dir_name), 0o700)
             return dir_name
         except FileExistsError:
             n += 1
@@ -297,11 +319,43 @@ def _create_tree(sdir):
         open(os.path.join(sdir, name), "a").close()
 
 
+def _load_or_none(dir_name):
+    """session.json of `dir_name`, or None when it is missing or unreadable (a stale pointer)."""
+    try:
+        return load_session(dir_name) if "/" not in dir_name else None
+    except TandemError:
+        return None
+
+
+def _normalise_test_cmds(cmds):
+    """Whitespace collapsed, in order, once each: every reader then uses the list as stored."""
+    out = [" ".join(c.split()) for c in cmds]
+    if not all(out):
+        raise TandemError("--test-cmd must not be empty")
+    return list(dict.fromkeys(out))
+
+
+def _end_replaced(old_dir, new_dir, now):
+    """Mark the repo's previous session replaced; returns its dir, or None if it had already ended.
+
+    Re-read under its own lock, like `end_session`, so a claim or `done` racing this isn't lost.
+    """
+    with locked(session_path(old_dir)):
+        old = _load_or_none(old_dir)
+        if not is_active(old):
+            return None
+        old["ended"] = iso(now)
+        old["replaced_by"] = new_dir
+        save_session(old)
+        write_log_line(session_path(old_dir), event_record("replaced", replaced_by=new_dir))
+    return old_dir
+
+
 def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, replace=False):
     """Create a session for the repo containing `cwd`; returns its session.json dict."""
     top = repo_toplevel(cwd)
     old_dir = read_pointer(top)
-    old = load_session(old_dir) if old_dir else None
+    old = _load_or_none(old_dir) if old_dir else None
     if is_active(old) and not replace:
         raise TandemError(
             "repo already has an active session %s (end it with `tandem done` or pass --replace)" % old_dir
@@ -322,7 +376,7 @@ def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, re
         "repo": top,
         "ticket": ticket,
         "task": task,
-        "test_cmds": list(test_cmds) if test_cmds is not None else detect_test_cmds(top),
+        "test_cmds": _normalise_test_cmds(test_cmds) if test_cmds is not None else detect_test_cmds(top),
         "roles": dict(DEFAULT_ROLES),
         "created": iso(now),
         "ended": None,
@@ -330,13 +384,7 @@ def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, re
     }
     save_session(meta)
 
-    replaced = None
-    if is_active(old):
-        old["ended"] = iso(now)
-        old["replaced_by"] = dir_name
-        save_session(old)
-        log_event(session_path(old_dir), "replaced", replaced_by=dir_name)
-        replaced = old_dir
+    replaced = _end_replaced(old_dir, dir_name, now) if is_active(old) else None
 
     write_pointer(top, dir_name)
     extra = {"replaces": replaced} if replaced else {}
@@ -375,16 +423,11 @@ def configure_init(p):
 
 
 def run_init(args):
-    test_cmds = None
-    if args.test_cmds is not None:
-        test_cmds = [c.strip() for c in args.test_cmds]
-        if not all(test_cmds):
-            raise TandemError("--test-cmd must not be empty")
     meta = init_session(
         name=args.name,
         ticket=args.ticket,
         task=_read_task(args),
-        test_cmds=test_cmds,
+        test_cmds=args.test_cmds,
         replace=args.replace,
     )
     print(session_path(meta["dir"]))
@@ -486,10 +529,14 @@ def resolve_session(explicit=None, cwd=None):
     if top is not None:
         pointed = read_pointer(top)
         if pointed:
-            meta = load_session(pointed)
+            try:
+                meta = load_session(pointed) if "/" not in pointed else None
+                why = "ended" if meta else "missing"
+            except TandemError:
+                meta, why = None, "unreadable"
             if is_active(meta):
                 return meta
-            stale = "%s (%s)" % (pointed, "ended" if meta else "missing")
+            stale = "%s (%s)" % (pointed, why)
 
     active = active_sessions()
     # Inside a repo the repo's own session is the only acceptable answer:
@@ -556,7 +603,7 @@ def build_summary(sdir, meta):
     messages = [r for r in records if r.get("kind") == "message"]
     consoles = [r for r in records if r.get("kind") == "console"]
     wrap_up = [m for m in messages if m.get("type") == "done"]
-    roles = meta.get("roles") or {}
+    roles = meta["roles"]
 
     facts = [
         "- session: `%s`" % meta.get("dir"),
@@ -613,16 +660,10 @@ def end_session(meta):
         summary = os.path.join(sdir, "summary.md")
         write_text_atomic(summary, build_summary(sdir, current))
         save_session(current)
-        write_log_line(
-            sdir, {"kind": "event", "ts": current["ended"], "event": "done", "session": current["dir"]}
-        )
+        write_log_line(sdir, event_record("done", ts=current["ended"], session=current["dir"]))
     if current.get("repo"):
         clear_pointer(current["repo"], current["dir"])
     return current
-
-
-def configure_done(p):
-    pass
 
 
 def run_done(args):
@@ -636,7 +677,7 @@ PAIR_ROLES = ("driver", "navigator")
 
 def role_of(meta, peer):
     """The pair role `peer` holds in `meta`'s session, or None."""
-    roles = meta.get("roles") or DEFAULT_ROLES
+    roles = meta["roles"]
     for role in PAIR_ROLES:
         if roles.get(role) == peer:
             return role
@@ -653,7 +694,7 @@ def live_claim(meta, peer):
     if not isinstance(claim, dict):
         return None
     pid = claim.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or not pid_alive(pid):
+    if not valid_pid(pid) or not pid_alive(pid):
         return None
     return claim
 
@@ -674,7 +715,7 @@ def claim_role(dir_name, peer, role=None, pid=None):
             raise TandemError("session %s no longer exists" % dir_name)
         if not is_active(meta):
             raise TandemError("session %s has ended; run `tandem init` to start a new one" % dir_name)
-        roles = dict(meta.get("roles") or DEFAULT_ROLES)
+        roles = dict(meta["roles"])
         held = role_of(meta, peer)
         role = role or held
         if role is None:
@@ -690,20 +731,33 @@ def claim_role(dir_name, peer, role=None, pid=None):
                 )
             roles[role] = peer
             if held is not None:
-                if holder:
-                    roles[held] = holder
-                else:
-                    roles.pop(held)
+                roles[held] = holder
         claims = dict(meta.get("claims") or {})
         claims[peer] = {"role": role, "pid": pid, "ts": iso(_now())}
         meta["roles"] = roles
         meta["claims"] = claims
         save_session(meta)
-        event = {"kind": "event", "ts": claims[peer]["ts"], "event": "role_claimed", "peer": peer, "role": role}
-        if held is not None and held != role:
-            event["was"] = held
-        write_log_line(sdir, event)
+        was = {"was": held} if held is not None and held != role else {}
+        write_log_line(sdir, event_record("role_claimed", ts=claims[peer]["ts"], peer=peer, role=role, **was))
     return meta
+
+
+def harness_extra(args, example):
+    """A launcher's own-argument list after `--`; anything else left over is an error."""
+    extra = list(args.extra or [])
+    if extra and extra[0] == "--":
+        return extra[1:]
+    if extra:
+        raise TandemError("pass the harness's own arguments after --, e.g. `%s`" % example)
+    return extra
+
+
+def harness_env(meta, role):
+    """The caller's environment plus the session and role the harness and its hooks act as."""
+    env = dict(os.environ)
+    env["TANDEM_SESSION"] = meta["dir"]
+    env["TANDEM_ROLE"] = role
+    return env
 
 
 def exec_harness(argv, env, cwd):

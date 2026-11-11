@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import select
 import signal
@@ -18,7 +19,6 @@ RETRY_INTERVAL = 5.0
 SEND_TIMEOUT = 30.0
 START_TIMEOUT = 10.0
 AGY_ENV = ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN")
-WATCHED_ROLES = maildir.WATCHED_ROLES
 
 
 def doorbell(role):
@@ -30,12 +30,8 @@ def detach_command(role):
     return "tandem watch --as %s --detach" % role
 
 
-def peer_dir(sdir, role):
-    return os.path.join(sdir, "peers", role)
-
-
 def rung_path(sdir, role):
-    return os.path.join(peer_dir(sdir, role), "rung")
+    return os.path.join(session.peer_dir(sdir, role), "rung")
 
 
 def read_rung(sdir, role):
@@ -68,25 +64,29 @@ def mark_rung(sdir, role, msg_id):
     """
     if msg_id <= read_rung(sdir, role):
         return
-    os.makedirs(peer_dir(sdir, role), exist_ok=True)
+    os.makedirs(session.peer_dir(sdir, role), exist_ok=True)
     session.write_text_atomic(rung_path(sdir, role), "%s\n" % maildir.format_id(msg_id))
 
 
-def claim_pidfile(sdir, role, text):
-    """Make this process the role's watcher; any older one sees a foreign pid and exits."""
-    os.makedirs(peer_dir(sdir, role), exist_ok=True)
-    with session.locked(sdir):
-        session.write_text_atomic(session.watcher_pidfile(sdir, role), text)
+def _write_pidfile(sdir, role, pid, ls_address):
+    """The caller holds `session.locked(sdir)`."""
+    os.makedirs(session.peer_dir(sdir, role), exist_ok=True)
+    record = {"pid": pid, "ls_address": ls_address}
+    session.write_text_atomic(session.watcher_pidfile(sdir, role), json.dumps(record) + "\n")
+
+
+def _owner(sdir, role):
+    return (session.read_watcher(sdir, role) or {}).get("pid")
 
 
 def owns_pidfile(sdir, role, pid):
-    return session.read_pidfile(session.watcher_pidfile(sdir, role)) == pid
+    return _owner(sdir, role) == pid
 
 
 def superseded(sdir, role, pid):
     # Only a pidfile naming another pid supersedes: newer watchers replace the
     # file atomically, so a missing one means cleanup, not a successor.
-    owner = session.read_pidfile(session.watcher_pidfile(sdir, role))
+    owner = _owner(sdir, role)
     return owner is not None and owner != pid
 
 
@@ -109,17 +109,17 @@ def _active(meta):
         return False
 
 
-def wait_once(meta, role, deadline=None, interval=None, clock=time.monotonic, sleep=time.sleep, pid=None):
+def wait_once(meta, role, deadline=math.inf, interval=POLL_INTERVAL, clock=time.monotonic, sleep=time.sleep, pid=None):
     """Claude's asyncRewake waiter: the doorbell text on mail, None otherwise.
 
     Returns None at `deadline` seconds, when the session ends, or once a newer
-    waiter has taken the pidfile.
+    waiter has taken the pidfile, which this one takes over from any older one.
     """
     sdir = session.session_path(meta["dir"])
     pid = os.getpid() if pid is None else pid
-    interval = POLL_INTERVAL if interval is None else interval
-    end = None if deadline is None else clock() + deadline
-    claim_pidfile(sdir, role, "%d\n" % pid)
+    end = clock() + deadline
+    with session.locked(sdir):
+        _write_pidfile(sdir, role, pid, None)
     try:
         while True:
             if not _active(meta) or superseded(sdir, role, pid):
@@ -133,13 +133,10 @@ def wait_once(meta, role, deadline=None, interval=None, clock=time.monotonic, sl
                         mark_rung(sdir, role, msg_id)
                         return doorbell(role)
                 continue
-            if end is not None:
-                left = end - clock()
-                if left <= 0:
-                    return None
-                sleep(min(interval, left))
-            else:
-                sleep(interval)
+            left = end - clock()
+            if left <= 0:
+                return None
+            sleep(min(interval, left))
     finally:
         release_pidfile(sdir, role, pid)
 
@@ -152,16 +149,23 @@ def agy_ls_address(environ):
             "%s not set: `tandem watch --detach` must be started by agy itself (a run_command tool "
             "call), since only agy's own children can reach its language server" % " and ".join(missing)
         )
-    address = environ["ANTIGRAVITY_LS_ADDRESS"]
-    parse_ls_address(address)
-    return address
+    return environ["ANTIGRAVITY_LS_ADDRESS"]
 
 
 def parse_ls_address(address):
-    host, sep, port = address.strip().rpartition(":")
+    """(host, port) from `host:port`, `[v6]:port` or a URL such as `http://host:port/`; None if neither.
+
+    The exact form agy uses is unverified (plan Task 17), so an optional scheme and path are
+    accepted rather than read as a dead language server.
+    """
+    text = address.strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0]
+    host, sep, port = text.rpartition(":")
     host = host.strip("[]")
     if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
-        raise TandemError("ANTIGRAVITY_LS_ADDRESS is not host:port: %r" % address)
+        return None
     return host, int(port)
 
 
@@ -169,10 +173,15 @@ def ls_alive(address, timeout=2.0):
     """Whether agy's language server still accepts connections.
 
     A restarted or quit agy gets a new LS address, so a refused connect means
-    the agy this watcher served is gone.
+    the agy this watcher served is gone. An address this can't parse is never
+    taken for a gone server; the watcher then stops only when superseded or
+    when the session ends.
     """
+    target = parse_ls_address(address)
+    if target is None:
+        return True
     try:
-        socket.create_connection(parse_ls_address(address), timeout=timeout).close()
+        socket.create_connection(target, timeout=timeout).close()
     except OSError:
         return False
     return True
@@ -183,7 +192,7 @@ def agentapi_exe(environ):
 
 
 def conversation_path(sdir):
-    return os.path.join(sdir, "peers", "agy", "conversation_id")
+    return os.path.join(session.peer_dir(sdir, "agy"), "conversation_id")
 
 
 def conversation_id(sdir, environ):
@@ -239,57 +248,38 @@ def send_doorbell(exe, conv, text, environ, run=subprocess.run, timeout=SEND_TIM
 
 
 def watch_log_path(sdir, role):
-    return os.path.join(peer_dir(sdir, role), "watch.log")
+    return os.path.join(session.peer_dir(sdir, role), "watch.log")
 
 
-def watcher_info(sdir, role):
-    """The pidfile as a dict (agy's `{pid, ls_address}` shape), or None."""
-    try:
-        with open(session.watcher_pidfile(sdir, role), encoding="utf-8") as f:
-            value = json.loads(f.read())
-    except (OSError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def live_watcher(sdir, role, ls_address):
-    """Pid of a live watcher already serving the agy at `ls_address`, or None."""
-    info = watcher_info(sdir, role)
-    if info is None or info.get("ls_address") != ls_address:
-        return None
-    pid = session.read_pidfile(session.watcher_pidfile(sdir, role))
-    return pid if pid is not None and session.pid_alive(pid) else None
-
-
-def agy_watcher_alive(sdir, role, environ):
-    """Whether a live agy-shaped watcher serves `role`, and serves this agy when the LS is known.
+def live_watcher(sdir, role, ls_address=None):
+    """Pid of a live agy watcher for `role` (serving the agy at `ls_address`, when given), or None.
 
     agy's hooks may run without the LS variables its tool calls get, so a
     live pid is all that can be checked then.
     """
-    info = watcher_info(sdir, role)
-    if info is None:
-        return False
-    pid = session.read_pidfile(session.watcher_pidfile(sdir, role))
-    if pid is None or not session.pid_alive(pid):
-        return False
-    ls_address = environ.get("ANTIGRAVITY_LS_ADDRESS")
-    return not ls_address or info.get("ls_address") == ls_address
+    info = session.read_watcher(sdir, role)
+    if info is None or not info.get("ls_address") or not session.pid_alive(info["pid"]):
+        return None
+    if ls_address and info["ls_address"] != ls_address:
+        return None
+    return info["pid"]
+
+
+def agy_watcher_alive(sdir, role, environ):
+    return live_watcher(sdir, role, environ.get("ANTIGRAVITY_LS_ADDRESS")) is not None
 
 
 def claim_agy_pidfile(sdir, role, ls_address, pid):
     """Take the role's pidfile unless a live watcher serves the same agy; returns that one's pid.
 
-    A pidfile naming another LS address, a dead pid or Claude's bare-pid shape
-    is taken over; its owner, if alive, sees a foreign pid and exits.
+    A pidfile naming another LS address, a dead pid or Claude's waiter is
+    taken over; its owner, if alive, sees a foreign pid and exits.
     """
-    os.makedirs(peer_dir(sdir, role), exist_ok=True)
     with session.locked(sdir):
         running = live_watcher(sdir, role, ls_address)
         if running is not None and running != pid:
             return running
-        record = {"pid": pid, "ls_address": ls_address}
-        session.write_text_atomic(session.watcher_pidfile(sdir, role), json.dumps(record) + "\n")
+        _write_pidfile(sdir, role, pid, ls_address)
     return None
 
 
@@ -298,40 +288,20 @@ def _stamp(text):
 
 
 def _ring(sdir, role, pid, msg_id, environ, log):
-    """Ring agy for `msg_id`; None on success (rung marker advanced), else why not."""
+    """Ring agy for `msg_id`; True once it rang (rung marker advanced unless superseded)."""
     conv = conversation_id(sdir, environ)
     if conv is None:
         log("no conversation id yet for #%s; will retry" % maildir.format_id(msg_id))
-        return "no conversation id"
+        return False
     failure = send_doorbell(agentapi_exe(environ), conv, doorbell(role), environ)
     if failure is not None:
         log("send-message to %s for #%s failed: %s" % (conv, maildir.format_id(msg_id), failure))
-        return failure
+        return False
     with session.locked(sdir):
         if not superseded(sdir, role, pid):
             mark_rung(sdir, role, msg_id)
     log("rang %s for #%s" % (conv, maildir.format_id(msg_id)))
-    return None
-
-
-def _loop(meta, sdir, role, ls_address, environ, interval, ls_interval, retry_interval, clock, sleep, pid, log):
-    next_ls_check = clock()
-    retry_at = None
-    while True:
-        if not _active(meta):
-            return "session ended"
-        if superseded(sdir, role, pid):
-            return "superseded"
-        now = clock()
-        if now >= next_ls_check:
-            if not ls_alive(ls_address):
-                return "agy language server gone"
-            next_ls_check = now + ls_interval
-        msg_id = unrung_id(sdir, role)
-        if msg_id is not None and (retry_at is None or now >= retry_at):
-            failed = _ring(sdir, role, pid, msg_id, environ, log)
-            retry_at = None if failed is None else clock() + retry_interval
-        sleep(interval)
+    return True
 
 
 def serve(
@@ -339,9 +309,9 @@ def serve(
     role,
     ls_address,
     environ=None,
-    interval=None,
-    ls_interval=None,
-    retry_interval=None,
+    interval=POLL_INTERVAL,
+    ls_interval=LS_CHECK_INTERVAL,
+    retry_interval=RETRY_INTERVAL,
     clock=time.monotonic,
     sleep=time.sleep,
     pid=None,
@@ -355,9 +325,6 @@ def serve(
     with "started" and this pid or "running" and the other watcher's.
     """
     environ = os.environ if environ is None else environ
-    interval = POLL_INTERVAL if interval is None else interval
-    ls_interval = LS_CHECK_INTERVAL if ls_interval is None else ls_interval
-    retry_interval = RETRY_INTERVAL if retry_interval is None else retry_interval
     pid = os.getpid() if pid is None else pid
     sdir = session.session_path(meta["dir"])
 
@@ -368,12 +335,31 @@ def serve(
         return None
     session.log_event(sdir, "watcher_started", role=role, peer="agy", pid=pid)
     log("watching %s for %s (pid %d)" % (meta["dir"], role, pid))
+    if parse_ls_address(ls_address) is None:
+        log("cannot parse ANTIGRAVITY_LS_ADDRESS %r; not checking the language server" % ls_address)
     if ready:
         ready("started", pid)
     reason = "crashed"
     try:
-        reason = _loop(meta, sdir, role, ls_address, environ, interval, ls_interval, retry_interval, clock, sleep, pid, log)
-        return reason
+        next_ls_check = clock()
+        retry_at = None
+        while True:
+            if not _active(meta):
+                reason = "session ended"
+                return reason
+            if superseded(sdir, role, pid):
+                reason = "superseded"
+                return reason
+            now = clock()
+            if now >= next_ls_check:
+                if not ls_alive(ls_address):
+                    reason = "agy language server gone"
+                    return reason
+                next_ls_check = now + ls_interval
+            msg_id = unrung_id(sdir, role)
+            if msg_id is not None and (retry_at is None or now >= retry_at):
+                retry_at = None if _ring(sdir, role, pid, msg_id, environ, log) else clock() + retry_interval
+            sleep(interval)
     except SystemExit:
         reason = "terminated"
         raise
@@ -446,16 +432,6 @@ def detach(log_path, start, timeout=START_TIMEOUT):
     return b"".join(chunks).decode("utf-8", "replace")
 
 
-def _seconds(text, flag, positive=False):
-    try:
-        value = float(text)
-    except ValueError:
-        raise TandemError("%s must be a number of seconds, not %r" % (flag, text))
-    if value != value or value < 0 or (positive and value == 0):
-        raise TandemError("%s must %s" % (flag, "be positive" if positive else "not be negative"))
-    return value
-
-
 def _on_term(signum, frame):
     # Claude kills the waiter at the hook timeout, and a detached watcher is
     # only ever stopped by a signal; exiting through SystemExit runs the
@@ -477,13 +453,13 @@ def configure_watch(p):
 
 
 def _run_once(args, role):
-    deadline = _seconds(args.deadline, "--deadline") if args.deadline is not None else None
+    deadline = session.seconds(args.deadline, "--deadline") if args.deadline is not None else math.inf
     meta = session.resolve_args(args)
     if not session.is_active(meta):
         return 0
     previous = signal.signal(signal.SIGTERM, _on_term)
     try:
-        ring = wait_once(meta, role, deadline=deadline)
+        ring = wait_once(meta, role, deadline=deadline, interval=POLL_INTERVAL)
     finally:
         signal.signal(signal.SIGTERM, previous)
     if ring is None:
@@ -493,19 +469,19 @@ def _run_once(args, role):
 
 
 def _run_detach(args, role):
-    interval = _seconds(args.poll_interval, "--poll-interval", True) if args.poll_interval else None
-    ls_interval = _seconds(args.ls_check_interval, "--ls-check-interval", True) if args.ls_check_interval else None
+    interval = session.seconds(args.poll_interval, "--poll-interval", True) if args.poll_interval else POLL_INTERVAL
+    ls_interval = (
+        session.seconds(args.ls_check_interval, "--ls-check-interval", True) if args.ls_check_interval else LS_CHECK_INTERVAL
+    )
     ls_address = agy_ls_address(os.environ)
     meta = session.resolve_args(args)
     if not session.is_active(meta):
         print("session %s has ended; no watcher started" % meta["dir"])
         return 0
     sdir = session.session_path(meta["dir"])
-    running = live_watcher(sdir, role, ls_address)
-    if running is not None:
-        print("tandem watch: already running for %s (pid %d)" % (role, running))
-        return 0
 
+    # A watcher already running is found by the detached child's own pidfile claim, under the
+    # lock, so a check here would only repeat it with a race.
     def start(notify):
         signal.signal(signal.SIGTERM, _on_term)
         serve(
@@ -532,8 +508,8 @@ def _run_detach(args, role):
 
 def run_watch(args):
     role = maildir.own_role(args, "watcher")
-    if role not in WATCHED_ROLES:
-        raise TandemError("--as must be one of %s for watch, not %r" % (", ".join(WATCHED_ROLES), role))
+    if role not in session.PAIR_ROLES:
+        raise TandemError("--as must be one of %s for watch, not %r" % (", ".join(session.PAIR_ROLES), role))
     if args.deadline is not None and not args.once:
         raise TandemError("--deadline needs --once")
     if (args.poll_interval or args.ls_check_interval) and not args.detach:

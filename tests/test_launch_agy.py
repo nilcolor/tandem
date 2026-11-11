@@ -7,8 +7,21 @@ from tandem import TandemError, hooks, launch_agy, protocol, session
 from tests.helpers import SHIM, TandemTestCase
 
 EVENTS = {"PreToolUse", "SessionStart", "PreInvocation", "Stop"}
+HOOK_EVENTS = (
+    ("PreToolUse", "agy-pretool"),
+    ("SessionStart", "agy-session-start"),
+    ("PreInvocation", "agy-preinvocation"),
+    ("Stop", "agy-stop"),
+)
+PROFILES = ("navigator", "fallback", "driver")
 ASK = {"decision": "ask"}
 BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
+NAV_TANDEM = ["tandem send", "tandem recv", "tandem status", "tandem log", "tandem watch"]
+DRIVER_TANDEM = NAV_TANDEM + ["tandem done"]
+
+
+def rules(kind, prefixes):
+    return ["%s(%s)" % (kind, p) for p in prefixes]
 
 
 def pretool_payload(command):
@@ -92,7 +105,7 @@ class HooksJsonTest(AgyFilesTestCase):
             self.assertEqual(self.doc["tandem"][event], [{"type": "command", "command": self.command(hook)}], event)
 
     def test_every_handler_names_a_registered_agy_hook(self):
-        for event, hook in launch_agy.HOOK_EVENTS:
+        for event, hook in HOOK_EVENTS:
             self.assertIn(hook, hooks.HOOKS)
             self.assertEqual(hooks.HOOKS[hook].peer, "agy")
             self.assertTrue(self.handler_command(event).endswith(" hook " + hook))
@@ -110,6 +123,7 @@ class HooksJsonTest(AgyFilesTestCase):
         self.assertEqual(self.doc, launch_agy.build_hooks(self.meta))
 
     def test_pretool_handler_runs_under_sh(self):
+        launch_agy.write_profile(self.meta, "navigator")
         proc = self.run_handler("PreToolUse", pretool_payload("go test ./..."))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout), BYPASS)
@@ -151,6 +165,14 @@ class RulesTest(AgyFilesTestCase):
         size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"])))
         self.assertLess(size, launch_agy.RULES_CAP)
 
+    def test_multibyte_brief_stays_under_cap(self):
+        # The brief is cut by bytes: 6000 CJK characters or emoji are 18-24 KB on their own.
+        for char in ("日", "😀"):
+            meta = session.init_session(cwd=self.repo, name="mb", task=char * 6000, replace=True)
+            launch_agy.write_agents_dir(meta, "navigator")
+            size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"])))
+            self.assertLess(size, launch_agy.RULES_CAP, char)
+
     def test_over_cap_writes_nothing(self):
         with mock.patch.object(protocol, "render", return_value="y" * (launch_agy.RULES_CAP + 1)):
             with self.assertRaises(TandemError) as ctx:
@@ -180,7 +202,10 @@ class ProfileTest(AgyFilesTestCase):
             {
                 "toolPermission": "proceed-in-sandbox",
                 "enableTerminalSandbox": True,
-                "permissions": {"allow": ["unsandboxed(go test)", "unsandboxed(tandem)"], "deny": ["write_file(*)"]},
+                "permissions": {
+                    "allow": rules("unsandboxed", NAV_TANDEM + ["go test"]),
+                    "deny": ["write_file(*)"],
+                },
             },
         )
 
@@ -191,14 +216,7 @@ class ProfileTest(AgyFilesTestCase):
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
-                    "allow": [
-                        "command(tandem)",
-                        "command(git status)",
-                        "command(git diff)",
-                        "command(git log)",
-                        "command(git show)",
-                        "command(go test)",
-                    ],
+                    "allow": rules("command", NAV_TANDEM + ["go test", "git status", "git diff", "git log", "git show"]),
                     "deny": ["write_file(*)"],
                 },
             },
@@ -210,12 +228,18 @@ class ProfileTest(AgyFilesTestCase):
             {
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
-                "permissions": {"allow": ["command(tandem)", "command(git)"], "deny": []},
+                "permissions": {"allow": rules("command", DRIVER_TANDEM + ["go test", "git"]), "deny": []},
             },
         )
 
+    def test_no_bare_tandem_rule(self):
+        # A bare `tandem` rule would pre-approve `tandem claude`, `init --replace` and `done`.
+        for kind in PROFILES:
+            allow = launch_agy.build_profile(self.meta, kind)["permissions"]["allow"]
+            self.assertFalse([r for r in allow if r.endswith("(tandem)")], kind)
+
     def test_every_profile_writes_allow_and_deny(self):
-        for kind in launch_agy.PROFILES:
+        for kind in PROFILES:
             path = launch_agy.write_profile(self.meta, kind)
             perms = self.read_json(path)["permissions"]
             self.assertEqual(set(perms), {"allow", "deny"}, kind)
@@ -234,23 +258,11 @@ class ProfileTest(AgyFilesTestCase):
         self.assertEqual(path, os.path.join(self.sdir, "peers", "agy", "profile.json"))
         self.assertEqual(self.read_json(path), launch_agy.build_profile(self.meta, "navigator"))
 
-    def test_custom_path(self):
-        path = os.path.join(self.tmp, "check", "navigator.json")
-        self.assertEqual(launch_agy.write_profile(self.meta, "navigator", path), path)
-        self.assertEqual(self.read_json(path)["toolPermission"], "proceed-in-sandbox")
-        self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir)))
-
-    def test_unknown_kind(self):
-        with self.assertRaises(TandemError):
-            launch_agy.build_profile(self.meta, "bogus")
-
     def test_profile_kind(self):
         self.assertEqual(launch_agy.profile_kind("navigator"), "navigator")
         self.assertEqual(launch_agy.profile_kind("navigator", fallback=True), "fallback")
         self.assertEqual(launch_agy.profile_kind("driver"), "driver")
         self.assertEqual(launch_agy.profile_kind("driver", fallback=True), "driver")
-        with self.assertRaises(TandemError):
-            launch_agy.profile_kind("human")
 
     def test_write_session_files(self):
         self.assertEqual(launch_agy.write_session_files(self.meta, "navigator"), "navigator")
@@ -267,69 +279,65 @@ class ProfileTest(AgyFilesTestCase):
 class UserDenyTest(AgyFilesTestCase):
     """A written deny replaces agy's global one, so the user's own denies are carried over."""
 
-    def write_settings(self, doc, path=None):
-        path = path or os.path.join(self.home, ".gemini", "antigravity-cli", "settings.json")
+    def write_settings(self, doc):
+        path = os.path.join(self.home, ".gemini", "antigravity-cli", "settings.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(doc if isinstance(doc, str) else json.dumps(doc))
         return path
 
-    def deny(self, kind, settings_path=None):
-        return launch_agy.build_profile(self.meta, kind, settings_path)["permissions"]["deny"]
+    def deny(self, kind):
+        return launch_agy.build_profile(self.meta, kind)["permissions"]["deny"]
 
-    def test_default_path_is_under_home(self):
+    def test_read_from_home(self):
         self.write_settings({"permissions": {"allow": ["command(ls)"], "deny": ["command(rm -rf)"]}})
         self.assertEqual(launch_agy.user_deny(), ["command(rm -rf)"])
         self.assertEqual(self.deny("navigator"), ["write_file(*)", "command(rm -rf)"])
         self.assertEqual(self.deny("fallback"), ["write_file(*)", "command(rm -rf)"])
         self.assertEqual(self.deny("driver"), ["command(rm -rf)"])
+        launch_agy.write_session_files(self.meta, "navigator")
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"], ["write_file(*)", "command(rm -rf)"])
 
     def test_user_allow_is_not_carried_over(self):
         self.write_settings({"permissions": {"allow": ["command(ls)"], "deny": []}})
-        for kind in launch_agy.PROFILES:
+        for kind in PROFILES:
             self.assertNotIn("command(ls)", launch_agy.build_profile(self.meta, kind)["permissions"]["allow"], kind)
 
-    def test_injected_path(self):
-        path = self.write_settings({"permissions": {"deny": ["command(git push)", "command(curl)"]}}, os.path.join(self.tmp, "agy.json"))
-        self.assertEqual(self.deny("driver", path), ["command(git push)", "command(curl)"])
-        self.assertEqual(self.deny("driver"), [])
-        written = launch_agy.write_profile(self.meta, "driver", settings_path=path)
-        self.assertEqual(self.read_json(written)["permissions"]["deny"], ["command(git push)", "command(curl)"])
-        launch_agy.write_session_files(self.meta, "navigator", settings_path=path)
-        self.assertEqual(
-            self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"],
-            ["write_file(*)", "command(git push)", "command(curl)"],
-        )
-
     def test_deduplicated(self):
-        path = self.write_settings({"permissions": {"deny": ["write_file(*)", "command(rm -rf)", "command(rm -rf)"]}})
-        self.assertEqual(self.deny("navigator", path), ["write_file(*)", "command(rm -rf)"])
-        self.assertEqual(self.deny("driver", path), ["write_file(*)", "command(rm -rf)"])
+        self.write_settings({"permissions": {"deny": ["write_file(*)", "command(rm -rf)", "command(rm -rf)"]}})
+        self.assertEqual(self.deny("navigator"), ["write_file(*)", "command(rm -rf)"])
+        self.assertEqual(self.deny("driver"), ["write_file(*)", "command(rm -rf)"])
 
-    def test_missing_or_unreadable_file(self):
-        self.assertEqual(launch_agy.user_deny(os.path.join(self.tmp, "nope.json")), [])
-        self.assertEqual(self.deny("navigator", os.path.join(self.tmp, "nope.json")), ["write_file(*)"])
-        self.assertEqual(launch_agy.user_deny(self.tmp), [])
-        unreadable = self.write_settings({"permissions": {"deny": ["command(rm -rf)"]}}, os.path.join(self.tmp, "locked.json"))
-        os.chmod(unreadable, 0)
-        self.addCleanup(os.chmod, unreadable, 0o600)
-        if not os.access(unreadable, os.R_OK):
-            self.assertEqual(launch_agy.user_deny(unreadable), [])
+    def test_missing_file(self):
+        self.assertEqual(launch_agy.user_deny(), [])
+        self.assertEqual(self.deny("navigator"), ["write_file(*)"])
+
+    def test_unreadable_file(self):
+        path = self.write_settings({"permissions": {"deny": ["command(rm -rf)"]}})
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o600)
+        if os.access(path, os.R_OK):
+            self.skipTest("this user can read a mode-0 file")
+        self.assertEqual(launch_agy.user_deny(), [])
+
+    def test_directory_in_place_of_the_file(self):
+        os.makedirs(os.path.join(self.home, ".gemini", "antigravity-cli", "settings.json"))
+        self.assertEqual(launch_agy.user_deny(), [])
 
     def test_malformed_shapes_give_nothing(self):
         for doc in ("{", "[]", "null", {"permissions": []}, {"permissions": {"deny": "command(rm)"}}, {"other": 1}):
-            path = self.write_settings(doc, os.path.join(self.tmp, "bad.json"))
-            self.assertEqual(launch_agy.user_deny(path), [], doc)
+            self.write_settings(doc)
+            self.assertEqual(launch_agy.user_deny(), [], doc)
 
     def test_non_string_and_blank_rules_skipped(self):
-        path = self.write_settings({"permissions": {"deny": [1, None, "", "  ", {"x": 1}, "command(rm -rf)"]}})
-        self.assertEqual(launch_agy.user_deny(path), ["command(rm -rf)"])
+        self.write_settings({"permissions": {"deny": [1, None, "", "  ", {"x": 1}, "command(rm -rf)"]}})
+        self.assertEqual(launch_agy.user_deny(), ["command(rm -rf)"])
 
     def test_user_file_is_never_written(self):
         path = self.write_settings({"permissions": {"deny": ["command(rm -rf)"]}})
         before = (self.read_text(path), os.stat(path).st_mtime_ns)
-        for kind in launch_agy.PROFILES:
-            launch_agy.write_profile(self.meta, kind, settings_path=path)
+        for kind in PROFILES:
+            launch_agy.write_profile(self.meta, kind)
         self.assertEqual((self.read_text(path), os.stat(path).st_mtime_ns), before)
 
 
@@ -349,7 +357,7 @@ class TestPrefixFlowTest(AgyFilesTestCase):
     def test_navigator_profile_has_each_prefix(self):
         self.assertEqual(
             self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["allow"],
-            ["unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)", "unsandboxed(tandem)"],
+            rules("unsandboxed", NAV_TANDEM + ["dip rspec", "bundle exec rspec"]),
         )
 
     def test_fallback_profile_has_exact_commands(self):
@@ -363,6 +371,7 @@ class TestPrefixFlowTest(AgyFilesTestCase):
         self.assertEqual(self.pretool("dip rspec spec/models/user_spec.rb"), BYPASS)
         self.assertEqual(self.pretool("bundle exec rspec"), BYPASS)
         self.assertEqual(self.pretool("tandem recv"), BYPASS)
+        self.assertEqual(self.pretool("tandem watch --as navigator --detach"), BYPASS)
 
     def test_hook_does_not_bypass_the_bare_tool(self):
         self.assertEqual(self.pretool("dip run rails c"), ASK)
@@ -371,26 +380,40 @@ class TestPrefixFlowTest(AgyFilesTestCase):
 
     def test_detected_prefix(self):
         profile = launch_agy.build_profile(self.new_session("detected", None), "navigator")
-        self.assertEqual(profile["permissions"]["allow"], ["unsandboxed(go test)", "unsandboxed(tandem)"])
+        self.assertEqual(profile["permissions"]["allow"], rules("unsandboxed", NAV_TANDEM + ["go test"]))
 
     def test_no_test_commands(self):
         os.remove(os.path.join(self.repo, "go.mod"))
         meta = self.new_session("bare", None)
         self.assertEqual(meta["test_cmds"], [])
-        self.assertEqual(launch_agy.build_profile(meta, "navigator")["permissions"]["allow"], ["unsandboxed(tandem)"])
+        self.assertEqual(launch_agy.build_profile(meta, "navigator")["permissions"]["allow"], rules("unsandboxed", NAV_TANDEM))
         self.assertEqual(
             launch_agy.build_profile(meta, "fallback")["permissions"]["allow"],
-            ["command(tandem)", "command(git status)", "command(git diff)", "command(git log)", "command(git show)"],
+            rules("command", NAV_TANDEM + ["git status", "git diff", "git log", "git show"]),
         )
 
     def test_prefix_normalisation(self):
-        meta = dict(self.meta, test_cmds=["  go   test ", "go test", "", "   ", 7, None, "make (all)", "tandem", "make test"])
-        self.assertEqual(launch_agy.rule_prefixes(meta), ["go test", "tandem", "make test"])
+        meta = self.new_session("norm", ["  go   test ", "go test", "make (all)", "tandem send", "make test"])
+        self.assertEqual(meta["test_cmds"], ["go test", "make (all)", "tandem send", "make test"])
         self.assertEqual(
             launch_agy.build_profile(meta, "navigator")["permissions"]["allow"],
-            ["unsandboxed(go test)", "unsandboxed(tandem)", "unsandboxed(make test)"],
+            rules("unsandboxed", NAV_TANDEM + ["go test", "make test"]),
         )
-        self.assertEqual(launch_agy.build_profile(dict(meta, test_cmds=None), "navigator")["permissions"]["allow"], ["unsandboxed(tandem)"])
+        launch_agy.write_session_files(meta, "navigator")
+        self.sdir = session.session_path(meta["dir"])
+        # Left out of the rules, so the hook doesn't force a bypass no rule would approve.
+        self.assertEqual(self.pretool("make (all)"), ASK)
+        self.assertEqual(self.pretool("make test V=1"), BYPASS)
+
+    def test_quoted_test_command_agrees_between_hook_and_rules(self):
+        # Both compare the command text, so the hook forces a bypass exactly where the rule approves.
+        meta = self.new_session("tags", ["go test -tags 'integration'"])
+        launch_agy.write_session_files(meta, "navigator")
+        self.sdir = session.session_path(meta["dir"])
+        allow = self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["allow"]
+        self.assertIn("unsandboxed(go test -tags 'integration')", allow)
+        self.assertEqual(self.pretool("go test -tags 'integration' ./..."), BYPASS)
+        self.assertEqual(self.pretool("go test -tags integration ./..."), ASK)
 
     def test_hook_reads_session_json_at_call_time(self):
         meta = session.load_session(self.dir)

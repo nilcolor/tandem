@@ -229,7 +229,9 @@ class EndedOrMissingSessionTest(ClaudePromptTestCase):
 
     def test_removed_session_dir(self):
         shutil.rmtree(self.sdir)
-        self.assert_quiet(self.hook(payload("x")))
+        result = self.hook(payload("x"))
+        self.assert_quiet(result)
+        self.assertIn("claude-prompt: TandemError", result[2])
 
     def test_claude_holds_no_role(self):
         self.set_roles(driver="agy", navigator="someone-else")
@@ -276,9 +278,8 @@ class CliTest(ClaudePromptTestCase):
 
     def test_registry(self):
         hook = hooks.HOOKS["claude-prompt"]
-        self.assertEqual((hook.peer, hook.safe), ("claude", None))
-        with self.assertRaises(ValueError):
-            hooks.register("claude-prompt", "claude", None)(lambda meta, payload: None)
+        self.assertEqual((hook.name, hook.peer, hook.safe), ("claude-prompt", "claude", None))
+        self.assertTrue(all(name == h.name for name, h in hooks.HOOKS.items()))
 
     def test_shim_invocation_as_generated(self):
         proc = self.run_shim("--session", self.dir, "hook", "claude-prompt", stdin=payload("from shim"))

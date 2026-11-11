@@ -177,7 +177,7 @@ class SelfCheckTest(AgyLaunchTestCase):
         self.assertIn(reason_part, event["check"])
 
     def test_rules_dropped_falls_back(self):
-        self.assert_fallback("drop", "permissions.allow lost unsandboxed(go test), unsandboxed(tandem)")
+        self.assert_fallback("drop", "permissions.allow lost unsandboxed(tandem send), unsandboxed(tandem recv)")
 
     def test_deny_dropped_falls_back(self):
         self.assert_fallback("nodeny", "permissions.deny lost write_file(*)")
@@ -185,14 +185,24 @@ class SelfCheckTest(AgyLaunchTestCase):
     def test_setting_changed_falls_back(self):
         self.assert_fallback("nosandbox", "enableTerminalSandbox is False")
 
-    def test_parse_error_falls_back(self):
-        self.assert_fallback("error", "exited 1: Error: --settings must be a JSON object")
+    def test_parse_error_falls_back_and_is_not_cached(self):
+        self.assert_fallback("error", "exited 1: Error: --settings must be a JSON object", cached=False)
 
     def test_unsupported_notice_falls_back(self):
         self.assert_fallback("warn", "unsupported")
 
-    def test_no_config_falls_back(self):
-        self.assert_fallback("badjson", "printed no config")
+    def test_no_config_falls_back_and_is_not_cached(self):
+        self.assert_fallback("badjson", "printed no config", cached=False)
+
+    def test_transient_failure_is_rechecked_next_launch(self):
+        # An expired login or an update banner fails one run; it must not pin the fallback.
+        os.environ["FAKE_AGY_MODE"] = "error"
+        self.launched("agy")
+        os.environ["FAKE_AGY_MODE"] = "ok"
+        _, _, _, err = self.launched("agy")
+        self.assertEqual(len(self.config_calls()), 2)
+        self.assertEqual(err, "")
+        self.assertEqual(self.profile()["toolPermission"], "proceed-in-sandbox")
 
     def test_timeout_falls_back_and_is_not_cached(self):
         with mock.patch.object(launch_agy, "CHECK_TIMEOUT", 1):
@@ -208,6 +218,9 @@ class SelfCheckTest(AgyLaunchTestCase):
         self.assertEqual(code, 1)
         self.assertIn("cannot run agy", msg)
         self.assertEqual(calls, [])
+        self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir)))
+        self.assertFalse(os.path.exists(launch_agy.agents_dir(self.sdir)))
+        self.assertEqual(self.events("agy_profile"), [])
 
     def test_cache_hit_skips_the_run(self):
         self.launched("agy")
@@ -224,6 +237,7 @@ class SelfCheckTest(AgyLaunchTestCase):
         self.assertEqual(len(self.config_calls()), 1)
         self.assertEqual(self.profile()["toolPermission"], "request-review")
         self.assertIn("self-check failed", err)
+        self.assertIn("cached; delete %s to re-run the check" % launch_agy.check_path(), err)
 
     def test_version_change_reruns(self):
         os.environ["FAKE_AGY_MODE"] = "drop"
@@ -272,17 +286,22 @@ class SelfCheckTest(AgyLaunchTestCase):
     def test_parse_check_reasons(self):
         profile = launch_agy.build_profile(self.meta, "navigator")
         ok = json.dumps({"command": {"data": {"config": profile}}})
-        self.assertIsNone(launch_agy.parse_check(profile, (0, ok, "")))
-        self.assertIn("timed out", launch_agy.parse_check(profile, None))
-        self.assertIn("exited 2: no output", launch_agy.parse_check(profile, (2, "", "")))
-        self.assertIn("printed no config", launch_agy.parse_check(profile, (0, json.dumps({"command": {"data": {"config": []}}}), "")))
-        self.assertIn("printed no config", launch_agy.parse_check(profile, (0, json.dumps([1]), "")))
+
+        def check(result, part, definitive):
+            reason, settled = launch_agy.parse_check(profile, result)
+            self.assertIn(part, reason)
+            self.assertIs(settled, definitive, part)
+
+        self.assertEqual(launch_agy.parse_check(profile, (0, ok, "")), (None, True))
+        check(None, "timed out", False)
+        check((2, "", ""), "exited 2: no output", False)
+        check((0, json.dumps({"command": {"data": {"config": []}}}), ""), "printed no config", False)
+        check((0, json.dumps([1]), ""), "printed no config", False)
         no_perms = dict(profile)
         del no_perms["permissions"]
-        reason = launch_agy.parse_check(profile, (0, json.dumps({"command": {"data": {"config": no_perms}}}), ""))
-        self.assertIn("permissions.allow lost", reason)
+        check((0, json.dumps({"command": {"data": {"config": no_perms}}}), ""), "permissions.allow lost", True)
         warned = 'Invalid "unsandboxed" permission rules found; they are ignored and grant nothing:'
-        self.assertIn("unsupported", launch_agy.parse_check(profile, (0, ok, warned)))
+        check((0, ok, warned), "unsupported", True)
 
 
 class ArgvEnvTest(AgyLaunchTestCase):
@@ -317,7 +336,8 @@ class ArgvEnvTest(AgyLaunchTestCase):
     def test_driver_profile_keeps_user_deny(self):
         self.set_user_deny(["command(rm -rf)"])
         self.launched("agy", "--role", "driver")
-        self.assertEqual(self.profile()["permissions"], {"allow": ["command(tandem)", "command(git)"], "deny": ["command(rm -rf)"]})
+        self.assertEqual(self.profile()["permissions"]["deny"], ["command(rm -rf)"])
+        self.assertIn("command(git)", self.profile()["permissions"]["allow"])
 
     def test_profile_fallback_skips_check(self):
         argv, env, _, err = self.launched("agy", "--profile", "fallback")
@@ -344,8 +364,6 @@ class ArgvEnvTest(AgyLaunchTestCase):
         code, _, err = self.run_cli("agy", "--profile", "loose")
         self.assertEqual(code, 1)
         self.assertIn("invalid choice", err)
-        with self.assertRaises(TandemError):
-            launch_agy.prepare(self.meta, profile="loose")
 
     def test_event_records_check(self):
         self.launched("agy")

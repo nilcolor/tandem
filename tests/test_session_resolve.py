@@ -206,6 +206,13 @@ class RepoPointerTest(ResolveTestCase):
         self.assertIn("no active session for %s" % self.repo, err)
         self.assertIn("stale repo pointer: %s (ended)" % self.first, err)
 
+    def test_unreadable_pointer_target_is_stale(self):
+        with open(os.path.join(session.session_path(self.first), "session.json"), "w") as f:
+            f.write("{")
+        err = self.resolve_error(cwd=self.repo)
+        self.assertIn("no active session for %s; run `tandem init`" % self.repo, err)
+        self.assertIn("stale repo pointer: %s (unreadable)" % self.first, err)
+
     def test_missing_pointer_target_is_stale(self):
         os.rename(session.session_path(self.first), os.path.join(self.tmp, "gone"))
         err = self.resolve_error(cwd=self.repo)

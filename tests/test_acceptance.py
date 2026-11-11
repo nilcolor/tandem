@@ -155,8 +155,7 @@ class AcceptanceTestCase(TandemTestCase):
         )
         self.waiters.append(proc)
         # With mail already waiting it rings and exits before anyone sees its pidfile.
-        pidfile = session.watcher_pidfile(self.sdir, "driver")
-        self.wait_for(lambda: proc.poll() is not None or session.read_pidfile(pidfile) is not None)
+        self.wait_for(lambda: proc.poll() is not None or session.read_watcher(self.sdir, "driver") is not None)
         return proc
 
     def wake(self, proc, timeout=10):

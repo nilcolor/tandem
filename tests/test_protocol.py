@@ -86,8 +86,15 @@ class RenderTest(ProtocolTestCase):
             with self.subTest(role=role, peer=peer):
                 text = protocol.render(self.meta_for(role, peer, **{k: meta[k] for k in ("task", "ticket", "test_cmds")}), peer)
                 self.assertLess(len(text.encode("utf-8")), LIMIT)
-                self.assertIn("Brief cut at %d characters" % protocol.TASK_CAP, text)
+                self.assertIn("Brief cut at %d bytes" % protocol.TASK_CAP, text)
                 self.assertIn(os.path.join(self.sdir, "session.json"), text)
+
+    def test_multibyte_brief_is_cut_by_bytes(self):
+        for char in ("日", "😀"):
+            text = protocol.render(self.meta_for("navigator", "agy", task=char * 6000), "agy")
+            self.assertLess(len(text.encode("utf-8")), LIMIT, char)
+            self.assertIn("Brief cut at %d bytes" % protocol.TASK_CAP, text)
+            self.assertNotIn("\ufffd", text)
 
     def test_driver_section(self):
         text = protocol.render(self.meta_for("driver", "claude"), "claude")
@@ -214,18 +221,7 @@ class MissingValuesTest(ProtocolTestCase):
         self.assertClean(text)
 
     def test_no_test_commands(self):
-        for cmds in ([], None, ["", "  "]):
-            with self.subTest(cmds=cmds):
-                text = protocol.render(dict(self.meta, test_cmds=cmds), "agy")
-                self.assertIn("Test commands: none configured", text)
-                self.assertClean(text)
-
-    def test_missing_keys(self):
-        meta = {"dir": self.meta["dir"]}
-        text = protocol.render(meta, "claude")
-        self.assertIn("# tandem pair session `fix-csv-bom`", text)
-        self.assertIn("You are the **driver**", text)
-        self.assertIn("No ticket or brief was given", text)
+        text = protocol.render(dict(self.meta, test_cmds=[]), "agy")
         self.assertIn("Test commands: none configured", text)
         self.assertClean(text)
 

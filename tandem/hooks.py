@@ -11,21 +11,9 @@ from tandem import TandemError, cmdline, maildir, protocol, session, watch
 # and exit 0.
 Hook = namedtuple("Hook", "name peer run safe")
 
-HOOKS = {}
-
 # The launcher's initial prompt carries this prefix so it isn't logged as human input.
 LAUNCHER_PREFIX = "tandem:"
 ERROR_CAP = 500
-
-
-def register(name, peer, safe):
-    def wrap(run):
-        if name in HOOKS:
-            raise ValueError("duplicate hook: %s" % name)
-        HOOKS[name] = Hook(name, peer, run, safe)
-        return run
-
-    return wrap
 
 
 class HookInputError(TandemError):
@@ -51,20 +39,20 @@ def parse_payload(raw):
 
 
 def hooks_log_path(sdir, peer):
-    return os.path.join(sdir, "peers", peer, "hooks.log")
+    return os.path.join(session.peer_dir(sdir, peer), "hooks.log")
 
 
-def note_failure(sdir, hook, exc):
+def note_failure(sdir, name, peer, exc):
     """One line in `peers/<peer>/hooks.log`, or stderr when no session was found."""
     line = "%s %s: %s: %s" % (
         session.iso(session._now()),
-        hook.name,
+        name,
         type(exc).__name__,
         str(exc).replace("\n", " ")[:ERROR_CAP],
     )
     if sdir is not None:
         try:
-            path = hooks_log_path(sdir, hook.peer)
+            path = hooks_log_path(sdir, peer)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -100,7 +88,6 @@ def log_console(meta, peer, body):
     return True
 
 
-@register("claude-prompt", "claude", safe=None)
 def claude_prompt(meta, payload):
     """UserPromptSubmit: log what the user typed. Prints nothing, since this hook's stdout
     would be added to the model's context."""
@@ -124,7 +111,7 @@ _clock = time.time
 
 
 def _agy_file(sdir, name):
-    return os.path.join(sdir, "peers", "agy", name)
+    return os.path.join(session.peer_dir(sdir, "agy"), name)
 
 
 def _read_text(path):
@@ -152,21 +139,46 @@ def record_conversation(sdir, payload, hook_name):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         session.write_text_atomic(path, conv + "\n")
     except OSError as exc:
-        note_failure(sdir, HOOKS[hook_name], exc)
+        note_failure(sdir, hook_name, "agy", exc)
 
 
-def bypass_prefixes(meta):
-    cmds = meta.get("test_cmds") or []
-    return [c for c in cmds if isinstance(c, str) and c.strip()] + ["tandem"]
+def sandboxed(sdir):
+    """Whether the agy profile last launched runs commands in the sandbox (the navigator profile).
+
+    Only that profile has `unsandboxed(...)` rules; forcing a bypass under the others would
+    prompt for it, while their `command(...)` rules approve the plain call.
+    """
+    try:
+        with open(_agy_file(sdir, "profile.json"), encoding="utf-8") as f:
+            profile = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(profile, dict) and profile.get("enableTerminalSandbox") is True
 
 
-@register("agy-pretool", "agy", safe=ASK)
+def _session_command(command):
+    """`tandem <sub>` when `command` runs a tandem subcommand outside AGENT_COMMANDS, else None.
+
+    Those start a harness or end or replace the session, which a navigator never does unasked.
+    """
+    for name, args in cmdline.commands(command):
+        if name != "tandem":
+            continue
+        rest = list(args)
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] == "--session" else rest[1:]
+        if rest and "tandem " + rest[0] not in protocol.AGENT_COMMANDS:
+            return "tandem " + rest[0]
+    return None
+
+
 def agy_pretool(meta, payload):
     """PreToolUse for run_command: force the bypass, gate a navigator's writes, or pass through.
 
     Never returns `{}`, which agy reads as deny.
     """
-    record_conversation(session.session_path(meta["dir"]), payload, "agy-pretool")
+    sdir = session.session_path(meta["dir"])
+    record_conversation(sdir, payload, "agy-pretool")
     call = payload.get("toolCall")
     if not isinstance(call, dict):
         raise HookInputError("no toolCall object in stdin")
@@ -176,11 +188,12 @@ def agy_pretool(meta, payload):
     command = args.get("CommandLine") if isinstance(args, dict) else None
     if not isinstance(command, str):
         raise HookInputError("run_command without a CommandLine string")
-    if cmdline.bypass_prefix(command, bypass_prefixes(meta)) is not None:
-        return BYPASS
+    role = session.role_of(meta, "agy")
+    if cmdline.bypass_prefix(command, protocol.approved_prefixes(meta, role)) is not None:
+        return BYPASS if sandboxed(sdir) else ASK
     # Writing is the driver's job; any other role (or none) is gated.
-    if session.role_of(meta, "agy") != "driver":
-        reason = cmdline.write_reason(command)
+    if role != "driver":
+        reason = cmdline.write_reason(command) or _session_command(command)
         if reason is not None:
             return {
                 "decision": "force_ask",
@@ -218,7 +231,6 @@ def _claim_unrung(sdir, role):
     return msg_id
 
 
-@register("agy-session-start", "agy", safe=NOOP)
 def agy_session_start(meta, payload):
     sdir = session.session_path(meta["dir"])
     record_conversation(sdir, payload, "agy-session-start")
@@ -237,7 +249,6 @@ def agy_session_start(meta, payload):
     return _system_message(lines)
 
 
-@register("agy-preinvocation", "agy", safe=NOOP)
 def agy_preinvocation(meta, payload):
     """PreInvocation: log what the user typed into agy, once.
 
@@ -267,7 +278,6 @@ def agy_preinvocation(meta, payload):
     return NOOP
 
 
-@register("agy-stop", "agy", safe=NOOP)
 def agy_stop(meta, payload):
     """Stop: when agy goes idle, restart a dead watcher and pick up mail no ring announced."""
     sdir = session.session_path(meta["dir"])
@@ -289,6 +299,18 @@ def agy_stop(meta, payload):
     if not reasons:
         return NOOP
     return {"decision": "continue", "reason": "\n".join(reasons)}
+
+
+HOOKS = {
+    hook.name: hook
+    for hook in (
+        Hook("claude-prompt", "claude", claude_prompt, None),
+        Hook("agy-pretool", "agy", agy_pretool, ASK),
+        Hook("agy-session-start", "agy", agy_session_start, NOOP),
+        Hook("agy-preinvocation", "agy", agy_preinvocation, NOOP),
+        Hook("agy-stop", "agy", agy_stop, NOOP),
+    )
+}
 
 
 def emit(output):
@@ -313,7 +335,7 @@ def run_hook(args):
         sdir = session.session_path(meta["dir"])
         output = hook.run(meta, parse_payload(raw))
     except Exception as exc:
-        note_failure(sdir, hook, exc)
+        note_failure(sdir, hook.name, hook.peer, exc)
         output = hook.safe
     try:
         emit(output)

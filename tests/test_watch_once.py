@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -41,7 +42,10 @@ class WatchTestCase(TandemTestCase):
 
     def write_pidfile(self, pid, role="driver"):
         os.makedirs(os.path.dirname(self.pidfile(role)), exist_ok=True)
-        session.write_text_atomic(self.pidfile(role), "%d\n" % pid)
+        session.write_text_atomic(self.pidfile(role), json.dumps({"pid": pid, "ls_address": None}) + "\n")
+
+    def owner(self, role="driver"):
+        return (session.read_watcher(self.sdir, role) or {}).get("pid")
 
     def mark_ended(self):
         meta = session.load_session(self.dir)
@@ -134,7 +138,7 @@ class RingTest(WatchTestCase):
 class RungMarkerTest(WatchTestCase):
     def test_missing_or_garbage_marker_is_zero(self):
         self.assertEqual(watch.read_rung(self.sdir, "driver"), 0)
-        os.makedirs(watch.peer_dir(self.sdir, "driver"))
+        os.makedirs(session.peer_dir(self.sdir, "driver"))
         with open(watch.rung_path(self.sdir, "driver"), "w") as f:
             f.write("garbage\n")
         self.assertEqual(watch.read_rung(self.sdir, "driver"), 0)
@@ -177,7 +181,7 @@ class ExitZeroTest(WatchTestCase):
         code, out, err = self.watch("--deadline", "5")
         self.assertEqual((code, out, err), (0, "", ""))
         self.assertLess(time.monotonic() - start, 2)
-        self.assertEqual(session.read_pidfile(self.pidfile()), 4242)
+        self.assertEqual(self.owner(), 4242)
 
     def test_superseded_waiter_leaves_the_ring_to_its_successor(self):
         def supersede_then_mail():
@@ -186,6 +190,15 @@ class ExitZeroTest(WatchTestCase):
 
         self.later(supersede_then_mail)
         self.assertEqual(self.watch("--deadline", "5")[0], 0)
+        self.assertEqual(watch.read_rung(self.sdir, "driver"), 0)
+
+    def test_superseded_between_the_check_and_the_lock(self):
+        # The successor takes the pidfile after the loop's own check but before the ring is
+        # claimed under the lock; the re-check there must leave the ring to it.
+        self.deliver()
+        answers = iter([False, True, True])
+        with mock.patch.object(watch, "superseded", side_effect=lambda *a: next(answers)):
+            self.assertIsNone(watch.wait_once(self.meta, "driver", deadline=5, interval=FAST, pid=1001))
         self.assertEqual(watch.read_rung(self.sdir, "driver"), 0)
 
     def test_newer_waiter_supersedes_older_one(self):
@@ -244,6 +257,8 @@ class ExitZeroTest(WatchTestCase):
 
     def test_without_a_deadline_it_waits_for_mail(self):
         self.later(self.deliver, delay=0.2)
+        # Safety bound: if the mail is missed, ending the session makes the wait return (and fail).
+        self.later(self.mark_ended, delay=10)
         self.assertEqual(self.watch(), (2, "", watch.doorbell("driver") + "\n"))
 
 
@@ -256,9 +271,9 @@ class PidfileTest(WatchTestCase):
             universal_newlines=True,
         )
         self.addCleanup(proc.kill)
-        self.wait_for(lambda: session.read_pidfile(self.pidfile()) == proc.pid)
+        self.wait_for(lambda: self.owner() == proc.pid)
         with open(self.pidfile()) as f:
-            self.assertEqual(f.read(), "%d\n" % proc.pid)
+            self.assertEqual(json.load(f), {"pid": proc.pid, "ls_address": None})
         code, out, _ = self.run_cli("status")
         self.assertIn("driver running (pid %d)" % proc.pid, out)
         proc.send_signal(signal.SIGTERM)
@@ -269,7 +284,7 @@ class PidfileTest(WatchTestCase):
     def test_release_leaves_a_foreign_pidfile(self):
         self.write_pidfile(4242)
         watch.release_pidfile(self.sdir, "driver", 1001)
-        self.assertEqual(session.read_pidfile(self.pidfile()), 4242)
+        self.assertEqual(self.owner(), 4242)
         watch.release_pidfile(self.sdir, "driver", 4242)
         self.assertFalse(os.path.exists(self.pidfile()))
 

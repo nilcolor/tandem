@@ -24,6 +24,24 @@ def shim_command(*args):
     return " ".join([shim] + [shlex.quote(a) for a in args])
 
 
+def make_private_dir(path):
+    """Create `path` (a dir under the home) and every dir down to it, owner-only when tandem creates them.
+
+    The spool holds every prompt typed into a console, briefs and messages.
+    """
+    home = tandem_home()
+    os.makedirs(home, 0o700, exist_ok=True)
+    current = home
+    for part in os.path.relpath(path, home).split(os.sep):
+        if part in ("", "."):
+            continue
+        current = os.path.join(current, part)
+        try:
+            os.mkdir(current, 0o700)
+        except FileExistsError:
+            pass
+
+
 def sessions_dir():
     return os.path.join(tandem_home(), "sessions")
 

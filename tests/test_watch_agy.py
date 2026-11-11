@@ -250,14 +250,24 @@ class EnvTest(AgyWatchTestCase):
         del os.environ["ANTIGRAVITY_CSRF_TOKEN"]
         self.assertIn("ANTIGRAVITY_LS_ADDRESS and ANTIGRAVITY_CSRF_TOKEN not set", self.error())
 
-    def test_bad_ls_address(self):
-        for value in ("localhost", "localhost:", "localhost:http", ":50444", "localhost:70000"):
-            os.environ["ANTIGRAVITY_LS_ADDRESS"] = value
-            self.assertIn("not host:port", self.error())
+    def test_unparseable_ls_address(self):
+        for value in ("localhost", "localhost:", "localhost:http", ":50444", "localhost:70000", "http://"):
+            self.assertIsNone(watch.parse_ls_address(value), value)
+            # Unknown form, not a dead server: the watcher keeps serving.
+            self.assertTrue(watch.ls_alive(value), value)
 
     def test_ls_address_forms(self):
         self.assertEqual(watch.parse_ls_address("localhost:50444"), ("localhost", 50444))
         self.assertEqual(watch.parse_ls_address("[::1]:50444"), ("::1", 50444))
+        self.assertEqual(watch.parse_ls_address("http://127.0.0.1:50444"), ("127.0.0.1", 50444))
+        self.assertEqual(watch.parse_ls_address("https://127.0.0.1:50444/ls/"), ("127.0.0.1", 50444))
+        self.assertEqual(watch.parse_ls_address(" [::1]:1 "), ("::1", 1))
+
+    def test_url_form_ls_address_is_checked(self):
+        port = self.ls.port
+        self.assertTrue(watch.ls_alive("http://127.0.0.1:%d" % port))
+        self.ls.close()
+        self.assertFalse(watch.ls_alive("http://127.0.0.1:%d" % port))
 
     def test_bad_intervals(self):
         self.assertIn("--poll-interval", self.error("--poll-interval", "0"))
@@ -285,13 +295,6 @@ class EnvTest(AgyWatchTestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("has ended", out)
         self.assertFalse(os.path.exists(self.pidfile()))
-
-    def test_already_running_with_same_ls_address(self):
-        other = self.live_process()
-        self.write_pidfile({"pid": other, "ls_address": self.address})
-        code, out, err = self.run_cli("--session", self.dir, "watch", "--as", "navigator", "--detach")
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out, "tandem watch: already running for navigator (pid %d)\n" % other)
 
     def test_agentapi_exe_defaults_to_agy(self):
         self.assertEqual(watch.agentapi_exe({}), "agy")
@@ -484,6 +487,28 @@ class ExitTest(AgyWatchTestCase):
         self.assertEqual((exited["pid"], exited["reason"]), (os.getpid(), "session ended"))
 
 
+class SupersededRingTest(AgyWatchTestCase):
+    def test_ring_by_a_superseded_watcher_leaves_the_marker_to_its_successor(self):
+        self.set_conversation("conv-1")
+        self.deliver()
+        with mock.patch.object(watch, "send_doorbell", return_value=None), mock.patch.object(
+            watch, "superseded", return_value=True
+        ):
+            self.assertTrue(watch._ring(self.sdir, "navigator", 1001, 1, {}, lambda line: None))
+        self.assertEqual(watch.read_rung(self.sdir, "navigator"), 0)
+
+
+class UnparseableAddressTest(AgyWatchTestCase):
+    def test_unparseable_ls_address_is_not_a_gone_server(self):
+        thread, result, lines = self.serve_in_thread(address="ls.sock")
+        self.wait_for(lambda: self.events("watcher_started"))
+        time.sleep(0.1)
+        self.assertTrue(thread.is_alive())
+        self.assertIn("cannot parse ANTIGRAVITY_LS_ADDRESS 'ls.sock'; not checking the language server", lines)
+        self.finish(thread)
+        self.assertEqual(result["reason"], "session ended")
+
+
 class SingleInstanceTest(AgyWatchTestCase):
     def test_live_watcher_with_same_ls_address_keeps_running(self):
         other = self.live_process()
@@ -492,24 +517,25 @@ class SingleInstanceTest(AgyWatchTestCase):
         reason = watch.serve(self.meta, "navigator", self.address, ready=lambda *a: seen.append(a), log=lambda l: None)
         self.assertIsNone(reason)
         self.assertEqual(seen, [("running", other)])
-        self.assertEqual(watch.watcher_info(self.sdir, "navigator")["pid"], other)
+        self.assertEqual(session.read_watcher(self.sdir, "navigator")["pid"], other)
         self.assertEqual(self.events("watcher_started"), [])
 
     def test_different_ls_address_takes_over(self):
         other = self.live_process()
         self.write_pidfile({"pid": other, "ls_address": "localhost:1"})
         thread, _, _ = self.serve_in_thread()
-        self.wait_for(lambda: (watch.watcher_info(self.sdir, "navigator") or {}).get("pid") == os.getpid())
-        self.assertEqual(watch.watcher_info(self.sdir, "navigator")["ls_address"], self.address)
+        self.wait_for(lambda: (session.read_watcher(self.sdir, "navigator") or {}).get("pid") == os.getpid())
+        self.assertEqual(session.read_watcher(self.sdir, "navigator")["ls_address"], self.address)
         self.finish(thread)
 
-    def test_dead_pid_and_bare_pid_are_taken_over(self):
+    def test_dead_unreadable_and_claude_pidfiles_are_taken_over(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        for record in ({"pid": dead.pid, "ls_address": self.address}, "%d" % self.live_process()):
+        live = self.live_process()
+        for record in ({"pid": dead.pid, "ls_address": self.address}, "%d" % live, {"pid": live, "ls_address": None}):
             self.write_pidfile(record)
             self.assertIsNone(watch.claim_agy_pidfile(self.sdir, "navigator", self.address, os.getpid()))
-            self.assertEqual(watch.watcher_info(self.sdir, "navigator"), {"pid": os.getpid(), "ls_address": self.address})
+            self.assertEqual(session.read_watcher(self.sdir, "navigator"), {"pid": os.getpid(), "ls_address": self.address})
 
     def test_old_watcher_sees_a_foreign_pidfile_and_exits(self):
         thread, result, _ = self.serve_in_thread()
@@ -518,7 +544,61 @@ class SingleInstanceTest(AgyWatchTestCase):
         self.assertIsNone(watch.claim_agy_pidfile(self.sdir, "navigator", "localhost:2", newer))
         thread.join(5)
         self.assertEqual(result["reason"], "superseded")
-        self.assertEqual(watch.watcher_info(self.sdir, "navigator"), {"pid": newer, "ls_address": "localhost:2"})
+        self.assertEqual(session.read_watcher(self.sdir, "navigator"), {"pid": newer, "ls_address": "localhost:2"})
+
+
+class DetachUnitTest(AgyWatchTestCase):
+    """`watch.detach` itself, with a stand-in for the watcher.
+
+    Run in a fresh interpreter: forking the multi-threaded test runner could deadlock the child.
+    """
+
+    STARTS = {
+        "notify": "lambda notify: notify('started 7') or 0",
+        "silent": "lambda notify: 0",
+        "raises": "lambda notify: (_ for _ in ()).throw(RuntimeError('cannot claim the pidfile'))",
+        "sleeps": "lambda notify: time.sleep(2) or 0",
+    }
+
+    def detach_with(self, start, timeout):
+        log = os.path.join(self.tmp, "detach.log")
+        script = (
+            "import json, sys, time\n"
+            "from tandem import watch\n"
+            "t = time.monotonic()\n"
+            "out = watch.detach(sys.argv[1], %s, timeout=float(sys.argv[2]))\n"
+            "print(json.dumps([out, time.monotonic() - t]))\n" % self.STARTS[start]
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script, log, str(timeout)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(watch.__file__))),
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out, elapsed = json.loads(proc.stdout)
+        return out, elapsed, log
+
+    def test_notified_text_is_returned(self):
+        self.assertEqual(self.detach_with("notify", 5)[0], "started 7")
+
+    def test_child_that_exits_without_notifying(self):
+        out, elapsed, _ = self.detach_with("silent", 5)
+        self.assertEqual(out, "")
+        self.assertLess(elapsed, 4)
+
+    def test_child_that_raises(self):
+        out, _, log = self.detach_with("raises", 5)
+        self.assertEqual(out, "")
+        with open(log) as f:
+            self.assertIn("RuntimeError: cannot claim the pidfile", f.read())
+
+    def test_child_silent_past_the_timeout(self):
+        out, elapsed, _ = self.detach_with("sleeps", 0.2)
+        self.assertEqual(out, "")
+        self.assertLess(elapsed, 1.5)
 
 
 class DetachTest(AgyWatchTestCase):
@@ -532,7 +612,7 @@ class DetachTest(AgyWatchTestCase):
         self.assertTrue(session.pid_alive(pid))
         self.assertNotEqual(os.getsid(pid), os.getsid(0))
         self.assertEqual(
-            watch.watcher_info(self.sdir, "navigator"), {"pid": pid, "ls_address": "localhost:%d" % self.ls.port}
+            session.read_watcher(self.sdir, "navigator"), {"pid": pid, "ls_address": "localhost:%d" % self.ls.port}
         )
         self.assertEqual(self.events("watcher_started")[0]["pid"], pid)
 
@@ -555,6 +635,22 @@ class DetachTest(AgyWatchTestCase):
         self.assertIn("rang conv-1 for #0001", text)
         self.assertIn("exiting: agy language server gone", text)
         self.assertNotIn("SECRET", text)
+
+    def test_already_running_with_same_ls_address(self):
+        # Found by the detached child's own claim under the lock, not by a check in the parent.
+        other = self.live_process()
+        self.write_pidfile({"pid": other, "ls_address": self.address})
+        proc, _ = self.detach()
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(proc.stdout, "tandem watch: already running for navigator (pid %d)\n" % other)
+        self.assertEqual(session.read_watcher(self.sdir, "navigator")["pid"], other)
+        self.assertEqual(self.watcher_processes(), [])
+
+    def test_watcher_that_never_reports_is_an_error(self):
+        with mock.patch.object(watch, "detach", return_value=""):
+            code, out, err = self.run_cli("--session", self.dir, "watch", "--as", "navigator", "--detach")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("watcher did not start; see %s" % watch.watch_log_path(self.sdir, "navigator"), err)
 
     def test_second_detach_reports_the_running_watcher(self):
         pid = self.started_pid(self.detach()[0])

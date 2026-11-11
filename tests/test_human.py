@@ -216,7 +216,6 @@ class TickTest(HumanTestCase):
         repl.tick()
         repl.tick(timeout=0.25)
         self.assertEqual(self.source.timeouts, [human.TICK, 0.25])
-        self.assertEqual(human.TICK, 1.0)
 
     def test_bare_text_sends_decision_to_driver(self):
         repl = self.repl(["go with option B"])
@@ -328,6 +327,21 @@ class TickTest(HumanTestCase):
             repl.tick()
 
 
+class UnreadableMailTest(HumanTestCase):
+    def test_unreadable_mail_is_reported_and_the_repl_continues(self):
+        self.deliver("first")
+        self.deliver("second")
+        with open(os.path.join(maildir.inbox_path(self.sdir, "human", "new"), "0001.json"), "w") as f:
+            f.write("{")
+        repl = self.repl([])
+        self.assertTrue(repl.tick())
+        self.assertIn("unreadable message", self.err.getvalue())
+        self.assertIn("0001.json", self.err.getvalue())
+        self.assertIn("#0002 driver → human", self.out.getvalue())
+        self.assertNotIn("#0001", self.out.getvalue())
+        self.assertEqual(self.inbox("human"), [])
+
+
 class RunTest(HumanTestCase):
     def test_banner_names_session_and_roles(self):
         code = human.run(self.meta, FakeSource(), self.out, self.err)
@@ -408,32 +422,33 @@ class FdLinesTest(TandemTestCase):
         self.addCleanup(timer.cancel)
         self.assertEqual(self.src.poll(2), ["late"])
 
-    def test_stdin_source_picks_fd_or_stream(self):
-        self.assertIsInstance(human.stdin_source(io.StringIO("")), human.StreamLines)
-        with os.fdopen(os.dup(self.r)) as f:
-            self.assertIsInstance(human.stdin_source(f), human.FdLines)
-
-    def test_stream_lines(self):
-        src = human.StreamLines(io.StringIO("a\r\nb"))
-        self.assertEqual([src.poll(1), src.poll(1), src.poll(1)], [["a"], ["b"], None])
+    def test_crlf_lines(self):
+        os.write(self.w, b"a\r\nb")
+        os.close(self.w)
+        self.assertEqual([self.src.poll(1), self.src.poll(1), self.src.poll(1)], [["a"], ["b"], None])
 
 
 class CliTest(HumanTestCase):
-    def test_in_process(self):
+    def test_quit_stops_reading(self):
         self.deliver("which option?", type="question")
-        code, out, err = self.run_cli("human", stdin="B\n/quit\nnot sent\n")
-        self.assertEqual((code, err), (0, ""))
-        self.assertIn("#0001 driver → human  question", out)
+        proc = self.run_shim("human", stdin="B\n/quit\nnot sent\n", cwd=self.repo)
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertIn("#0001 driver → human  question", proc.stdout)
         [msg] = self.inbox("driver")
         self.assertEqual((msg["body"], msg["reply_to"]), ("B", "0001"))
+
+    def test_stdin_without_a_descriptor_is_an_error(self):
+        code, out, err = self.run_cli("human", stdin="hi\n")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("terminal or a pipe", err)
+        self.assertEqual(self.inbox("driver"), [])
 
     def test_outside_a_repo_uses_the_only_active_session(self):
         outside = os.path.join(self.tmp, "outside")
         os.makedirs(outside)
-        os.chdir(outside)
-        code, out, err = self.run_cli("human", stdin="@navigator from anywhere\n")
-        self.assertEqual((code, err), (0, ""))
-        self.assertIn("session %s" % self.dir, out)
+        proc = self.run_shim("human", stdin="@navigator from anywhere\n", cwd=outside)
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertIn("session %s" % self.dir, proc.stdout)
         self.assertEqual([m["body"] for m in self.inbox("navigator")], ["from anywhere"])
 
     def test_outside_a_repo_with_two_sessions_is_an_error(self):
@@ -452,8 +467,8 @@ class CliTest(HumanTestCase):
         os.makedirs(outside)
         os.chdir(outside)
         session.init_session(cwd=self.make_repo("admin"), name="other")
-        code, out, err = self.run_cli("--session", "fix-csv-bom", "human", stdin="hi\n")
-        self.assertEqual((code, err), (0, ""))
+        proc = self.run_shim("--session", "fix-csv-bom", "human", stdin="hi\n", cwd=outside)
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
         self.assertEqual(len(self.inbox("driver")), 1)
 
     def test_ended_session_is_refused(self):

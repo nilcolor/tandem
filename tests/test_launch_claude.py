@@ -65,7 +65,20 @@ class SettingsTest(LaunchTestCase):
     def test_driver_settings(self):
         self.launched("claude")
         s = self.settings()
-        self.assertEqual(s["permissions"], {"allow": ["Bash(tandem *)"]})
+        self.assertEqual(
+            s["permissions"],
+            {
+                "allow": [
+                    "Bash(tandem send *)",
+                    "Bash(tandem recv *)",
+                    "Bash(tandem status *)",
+                    "Bash(tandem log *)",
+                    "Bash(tandem watch *)",
+                    "Bash(tandem done *)",
+                    "Bash(dip rspec *)",
+                ]
+            },
+        )
         [stop_group] = s["hooks"]["Stop"]
         [stop] = stop_group["hooks"]
         self.assertEqual(stop["type"], "command")
@@ -82,7 +95,18 @@ class SettingsTest(LaunchTestCase):
     def test_navigator_settings_deny_edits(self):
         self.launched("claude", "--role", "navigator")
         s = self.settings()
-        self.assertEqual(s["permissions"]["allow"], ["Bash(tandem *)"])
+        # No `tandem done` (nor init, claude, agy) for a navigator: those prompt.
+        self.assertEqual(
+            s["permissions"]["allow"],
+            [
+                "Bash(tandem send *)",
+                "Bash(tandem recv *)",
+                "Bash(tandem status *)",
+                "Bash(tandem log *)",
+                "Bash(tandem watch *)",
+                "Bash(dip rspec *)",
+            ],
+        )
         self.assertEqual(s["permissions"]["deny"], ["Edit", "Write", "NotebookEdit"])
         self.assertIn("--as navigator", s["hooks"]["Stop"][0]["hooks"][0]["command"])
 
@@ -253,6 +277,12 @@ class RoleClaimTest(LaunchTestCase):
     def test_bad_role(self):
         with self.assertRaises(TandemError):
             session.claim_role(self.dir, "claude", "human")
+
+    def test_session_removed_before_the_claim(self):
+        os.remove(os.path.join(self.sdir, "session.json"))
+        with self.assertRaises(TandemError) as ctx:
+            session.claim_role(self.dir, "claude", "driver")
+        self.assertIn("no longer exists", str(ctx.exception))
 
     def test_bad_role_flag_is_usage_error(self):
         code, _, err = self.run_cli("claude", "--role", "human")

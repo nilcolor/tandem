@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -196,31 +197,47 @@ class LogFollowTest(SessionTestCase):
             env=dict(os.environ),
         )
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
-        self.assertIn("* init", proc.stdout.readline())
+        lines = queue.Queue()
+        reader = threading.Thread(target=lambda: [lines.put(line) for line in proc.stdout], daemon=True)
+        reader.start()
+
+        def next_line():
+            # A bounded wait, so a follow that stops printing fails instead of hanging the suite.
+            try:
+                return lines.get(timeout=10)
+            except queue.Empty:
+                self.fail("log -f printed nothing within 10s")
+
+        self.assertIn("* init", next_line())
         self.deliver("live message")
-        self.assertIn("#0001 driver → navigator", proc.stdout.readline())
-        self.assertEqual(proc.stdout.readline(), "    live message\n")
+        self.assertIn("#0001 driver → navigator", next_line())
+        self.assertEqual(next_line(), "    live message\n")
         session.end_session(self.meta)
-        out, err = proc.communicate(timeout=10)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertIn("* done session=%s" % self.dir, out)
+        self.assertEqual(proc.wait(timeout=10), 0, proc.stderr.read())
+        reader.join(5)
+        rest = []
+        while not lines.empty():
+            rest.append(lines.get())
+        self.assertIn("* done session=%s" % self.dir, "".join(rest))
+        proc.stdout.close()
+        proc.stderr.close()
 
 
 class PidfileTest(SessionTestCase):
-    def path(self, text):
+    def read(self, text):
         self.write_pidfile("driver", text)
-        return session.watcher_pidfile(self.sdir, "driver")
+        return session.read_watcher(self.sdir, "driver")
 
-    def test_shapes(self):
-        self.assertEqual(session.read_pidfile(self.path("123\n")), 123)
-        self.assertEqual(session.read_pidfile(self.path('{"pid": 77, "ls_address": "127.0.0.1:1"}')), 77)
+    def test_shape(self):
+        self.assertEqual(self.read('{"pid": 77, "ls_address": "127.0.0.1:1"}'), {"pid": 77, "ls_address": "127.0.0.1:1"})
+        self.assertEqual(self.read('{"pid": 78, "ls_address": null}'), {"pid": 78, "ls_address": None})
 
     def test_bad_contents(self):
-        for text in ("", "abc", "0", "-5", "true", '{"ls_address": "x"}', '{"pid": "12"}', "[1]"):
-            self.assertIsNone(session.read_pidfile(self.path(text)), text)
+        for text in ("", "abc", "123", "0", "true", '{"ls_address": "x"}', '{"pid": "12"}', '{"pid": 0}', '{"pid": true}', "[1]"):
+            self.assertIsNone(self.read(text), text)
 
     def test_missing(self):
-        self.assertIsNone(session.read_pidfile(os.path.join(self.sdir, "nope")))
+        self.assertIsNone(session.read_watcher(self.sdir, "driver"))
 
     def test_liveness(self):
         self.assertTrue(session.pid_alive(os.getpid()))
@@ -260,7 +277,7 @@ class StatusTest(SessionTestCase):
         )
 
     def test_watchers(self):
-        self.write_pidfile("driver", "%d\n" % os.getpid())
+        self.write_pidfile("driver", json.dumps({"pid": os.getpid(), "ls_address": None}))
         self.write_pidfile("navigator", json.dumps({"pid": self.dead_pid(), "ls_address": "127.0.0.1:9"}))
         line = self.ok("status").splitlines()[-1]
         self.assertRegex(line, r"^  watchers: driver running \(pid %d\), navigator dead \(stale pid \d+\)$" % os.getpid())
@@ -471,21 +488,33 @@ class DoneTest(SessionTestCase):
                     "-c",
                     "import subprocess, sys\n"
                     "for i in range(10):\n"
-                    "    subprocess.run([sys.executable, sys.argv[1], '--session', sys.argv[2], 'send',"
+                    "    r = subprocess.run([sys.executable, sys.argv[1], '--session', sys.argv[2], 'send',"
                     " '--as', 'driver', '--to', 'navigator', 'race %s' % i], stdout=subprocess.DEVNULL,"
-                    " stderr=subprocess.DEVNULL)\n",
+                    " stderr=subprocess.PIPE, universal_newlines=True)\n"
+                    "    print(r.returncode, r.stderr.strip(), flush=True)\n",
                     SHIM,
                     self.dir,
                 ],
+                stdout=subprocess.PIPE,
+                universal_newlines=True,
                 env=dict(os.environ),
             )
             for _ in range(3)
         ]
-        time.sleep(0.3)
+        # End mid-stream: after the first send landed, while the rest are still coming.
+        deadline = time.monotonic() + 30
+        while not maildir._message_ids(self.sdir):
+            self.assertLess(time.monotonic(), deadline, "no send landed")
+            time.sleep(0.01)
         session.end_session(self.meta)
+        results = []
         for proc in senders:
-            proc.wait(30)
+            out, _ = proc.communicate(timeout=60)
+            results += out.splitlines()
         delivered = sorted(maildir._message_ids(self.sdir))
+        self.assertTrue(0 < len(delivered) < 30, delivered)
+        self.assertEqual(len([r for r in results if r.startswith("0 ")]), len(delivered))
+        self.assertTrue(any("has ended" in r for r in results), results)
         text = self.summary()
         self.assertIn("## Messages (%d)" % len(delivered), text)
         for n in delivered:

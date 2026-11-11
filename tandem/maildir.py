@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import sys
@@ -199,9 +200,12 @@ def run_send(args):
 
 
 def _read_message(path):
+    """The envelope stored at `path`; FileNotFoundError passes through, anything else is a TandemError."""
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
+    except FileNotFoundError:
+        raise
     except (OSError, ValueError) as exc:
         raise TandemError("unreadable message %s: %s" % (path, exc))
 
@@ -210,9 +214,11 @@ def peek(sdir, role):
     """The lowest-id unread message for `role`, left in `new/`; None if there is none."""
     new_dir = inbox_path(sdir, role, "new")
     for name in _inbox_names(sdir, role, "new"):
-        path = os.path.join(new_dir, name)
-        if os.path.exists(path):
-            return _read_message(path)
+        try:
+            return _read_message(os.path.join(new_dir, name))
+        except FileNotFoundError:
+            # Consumed by a concurrent `recv` since the listing.
+            continue
     return None
 
 
@@ -230,12 +236,15 @@ def pop(sdir, role):
             os.rename(os.path.join(new_dir, name), dest)
         except FileNotFoundError:
             continue
-        return _read_message(dest)
+        try:
+            return _read_message(dest)
+        except (OSError, TandemError) as exc:
+            # Left in cur/ so its id stays taken; the next read moves on to the next message.
+            raise TandemError("%s (set aside as read; read again for the next message)" % exc)
     return None
 
 
-def render(msg):
-    """Header line, refs, blank line, body."""
+def _head_and_refs(msg):
     head = "#%s %s → %s  %s" % (msg.get("id"), msg.get("from"), msg.get("to"), msg.get("type"))
     notes = []
     if msg.get("reply_to"):
@@ -244,15 +253,19 @@ def render(msg):
         notes.append("expects reply")
     if notes:
         head += "  " + ", ".join(notes)
-    lines = [head]
+    lines = []
     refs = msg.get("refs") or {}
     if refs.get("commit"):
         lines.append("commit: %s" % refs["commit"])
     if refs.get("files"):
         lines.append("files: %s" % ", ".join(refs["files"]))
-    lines.append("")
-    lines.append(msg.get("body") or "")
-    return "\n".join(lines)
+    return head, lines
+
+
+def render(msg):
+    """Header line, refs, blank line, body."""
+    head, refs = _head_and_refs(msg)
+    return "\n".join([head] + refs + ["", msg.get("body") or ""])
 
 
 def receive(meta, role, consume=True, wait=False, timeout=None):
@@ -265,30 +278,17 @@ def receive(meta, role, consume=True, wait=False, timeout=None):
     if not os.path.isdir(inbox_path(sdir, role, "new")):
         raise TandemError("session %s has no %s inbox" % (meta["dir"], role))
     take = pop if consume else peek
-    deadline = None if timeout is None else time.monotonic() + timeout
+    deadline = time.monotonic() + (math.inf if timeout is None else timeout)
     while True:
         msg = take(sdir, role)
         if msg is not None or not wait:
             return msg
         if not session.is_active(session.load_session(meta["dir"])):
             return None
-        if deadline is not None:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None
-            time.sleep(min(POLL_INTERVAL, left))
-        else:
-            time.sleep(POLL_INTERVAL)
-
-
-def _seconds(text):
-    try:
-        value = float(text)
-    except ValueError:
-        raise TandemError("--timeout must be a number of seconds, not %r" % text)
-    if value < 0 or value != value:
-        raise TandemError("--timeout must not be negative")
-    return value
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        time.sleep(min(POLL_INTERVAL, left))
 
 
 def configure_recv(p):
@@ -301,7 +301,7 @@ def configure_recv(p):
 
 def run_recv(args):
     role = own_role(args, "reader")
-    timeout = _seconds(args.timeout) if args.timeout is not None else None
+    timeout = session.seconds(args.timeout, "--timeout") if args.timeout is not None else None
     meta = session.resolve_args(args)
     msg = receive(meta, role, consume=not args.peek, wait=args.wait or timeout is not None, timeout=timeout)
     if msg is None:
@@ -310,10 +310,6 @@ def run_recv(args):
         return NO_MAIL
     print(json.dumps(msg, ensure_ascii=False) if args.json else render(msg))
     return 0
-
-
-FOLLOW_INTERVAL = 0.5
-WATCHED_ROLES = ("driver", "navigator")
 
 
 def _indented(first, rest):
@@ -339,10 +335,8 @@ def render_record(line):
     ts = record.get("ts") or "?"
     kind = record["kind"]
     if kind == "message":
-        head, *rest = render(record).split("\n")
-        # render()'s blank line before the body; indentation already sets the body apart.
-        rest.remove("")
-        return _indented("%s  %s" % (ts, head), rest)
+        head, refs = _head_and_refs(record)
+        return _indented("%s  %s" % (ts, head), refs + (record.get("body") or "").splitlines())
     if kind == "console":
         head = "%s  %s → %s  console (%s)" % (ts, record.get("from"), record.get("to"), record.get("peer"))
         return _indented(head, (record.get("body") or "").splitlines())
@@ -352,7 +346,7 @@ def render_record(line):
     return ("%s  * %s %s" % (ts, record.get("event"), extra)).rstrip()
 
 
-def follow_log(meta, emit, follow=False, interval=None):
+def follow_log(meta, emit, follow=False, interval=POLL_INTERVAL):
     """Feed every complete log line to `emit`; with `follow`, keep reading by byte offset.
 
     Following stops once the session has ended and the log is drained:
@@ -377,7 +371,7 @@ def follow_log(meta, emit, follow=False, interval=None):
             for line in session.log_lines(sdir, offset)[0]:
                 emit(line)
             return
-        time.sleep(FOLLOW_INTERVAL if interval is None else interval)
+        time.sleep(interval)
 
 
 def configure_log(p):
@@ -414,12 +408,12 @@ def last_messages(sdir):
 
 
 def watcher_state(sdir, role):
-    path = session.watcher_pidfile(sdir, role)
-    if not os.path.lexists(path):
+    if not os.path.lexists(session.watcher_pidfile(sdir, role)):
         return "not running"
-    pid = session.read_pidfile(path)
-    if pid is None:
+    info = session.read_watcher(sdir, role)
+    if info is None:
         return "unreadable pidfile"
+    pid = info["pid"]
     if session.pid_alive(pid):
         return "running (pid %d)" % pid
     return "dead (stale pid %d)" % pid
@@ -427,7 +421,7 @@ def watcher_state(sdir, role):
 
 def describe_session(meta):
     sdir = session.session_path(meta["dir"])
-    roles = meta.get("roles") or {}
+    roles = meta["roles"]
     head = "%s  %s" % (meta["dir"], meta.get("repo") or "?")
     if not session.is_active(meta):
         head += "  (ended %s)" % meta["ended"]
@@ -449,7 +443,7 @@ def describe_session(meta):
                 "  last from %s: #%s %s → %s  %s" % (role, msg.get("id"), msg.get("type"), msg.get("to"), msg.get("ts"))
             )
     lines.append(
-        "  watchers: " + ", ".join("%s %s" % (r, watcher_state(sdir, r)) for r in WATCHED_ROLES)
+        "  watchers: " + ", ".join("%s %s" % (r, watcher_state(sdir, r)) for r in session.PAIR_ROLES)
     )
     return "\n".join(lines)
 
@@ -468,10 +462,6 @@ def stale_pointers():
         elif not session.is_active(meta):
             stale.append((repo, dir_name, "ended"))
     return stale
-
-
-def configure_status(p):
-    pass
 
 
 def run_status(args):

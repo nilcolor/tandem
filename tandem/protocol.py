@@ -5,10 +5,15 @@ from tandem import TandemError, session, watch
 
 TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "protocol.md")
 PEERS = {"claude": "Claude Code", "agy": "agy"}
-PAIR_ROLES = session.PAIR_ROLES
-# agy caps each rules file at 24 KB; the brief is the only unbounded value, so it is cut well
-# below that and the rest of the protocol always fits under 16 KB.
+# agy caps each rules file at 24 KB; the brief is the only unbounded value, so it is cut (in
+# UTF-8 bytes, the unit of agy's cap) to keep the whole protocol under 16 KB.
 TASK_CAP = 6000
+# The tandem subcommands the protocol has agents type, and the only ones pre-approved for them
+# (Claude allow rules, agy bypass and command rules). The rest (`claude`, `agy`, `init`, `human`,
+# `hook`, and `done` for a navigator) start a harness or end the session, so they get a prompt.
+AGENT_COMMANDS = ("tandem send", "tandem recv", "tandem status", "tandem log", "tandem watch")
+# The driver closes the session once the user has confirmed in its console.
+DRIVER_COMMANDS = AGENT_COMMANDS + ("tandem done",)
 
 _MARKER = re.compile(r"^<!-- tandem: (shared|role [a-z]+|peer [a-z]+) -->$")
 _PLACEHOLDER = re.compile(r"\{\{([a-z_]+)\}\}")
@@ -41,7 +46,29 @@ def peer_role(meta, peer):
 
 
 def _other(role):
-    return PAIR_ROLES[1 - PAIR_ROLES.index(role)]
+    return session.PAIR_ROLES[1 - session.PAIR_ROLES.index(role)]
+
+
+def rule_safe_tests(meta):
+    """The session's test commands usable as permission prefixes.
+
+    One with `(` or `)` would end an agy rule early, so it is left out everywhere (agy rules,
+    the hook's bypass, Claude's allow rules) rather than in one place only.
+    """
+    return [c for c in meta["test_cmds"] if "(" not in c and ")" not in c]
+
+
+def approved_prefixes(meta, role):
+    """Command prefixes `role` runs without a prompt: its tandem commands, then the tests, once each."""
+    tandem = DRIVER_COMMANDS if role == "driver" else AGENT_COMMANDS
+    return list(dict.fromkeys(list(tandem) + rule_safe_tests(meta)))
+
+
+def first_turn(role):
+    """How a launcher's initial prompt ends: what the role does once its inbox is drained."""
+    if role == "driver":
+        return "then start the intake phase as your tandem protocol describes"
+    return "then wait for the driver's plan: if there was no mail, say so and end your turn"
 
 
 def _brief(meta, sdir):
@@ -51,9 +78,10 @@ def _brief(meta, sdir):
     if ticket:
         parts.append("Ticket: `%s`." % ticket)
     if task:
-        if len(task) > TASK_CAP:
-            task = "%s\n\n[Brief cut at %d characters; the full text is the `task` field of `%s`.]" % (
-                task[:TASK_CAP].rstrip(),
+        raw = task.encode("utf-8")
+        if len(raw) > TASK_CAP:
+            task = "%s\n\n[Brief cut at %d bytes; the full text is the `task` field of `%s`.]" % (
+                raw[:TASK_CAP].decode("utf-8", "ignore").rstrip(),
                 TASK_CAP,
                 os.path.join(sdir, "session.json"),
             )
@@ -64,7 +92,7 @@ def _brief(meta, sdir):
 
 
 def _tests(meta):
-    cmds = [c for c in (meta.get("test_cmds") or []) if c and c.strip()]
+    cmds = meta["test_cmds"]
     if not cmds:
         return "none configured; find the repo's own (README, Makefile) and tell your peer which you use."
     return ", ".join("`%s`" % c for c in cmds)
@@ -73,8 +101,7 @@ def _tests(meta):
 def values(meta, peer, role):
     sdir = session.session_path(meta["dir"])
     other = _other(role)
-    roles = meta.get("roles") or session.DEFAULT_ROLES
-    other_peer = roles.get(other) or session.DEFAULT_ROLES[other]
+    other_peer = meta["roles"][other]
     return {
         "session": meta.get("name") or session.short_name(meta["dir"]),
         "session_dir": sdir,
@@ -104,7 +131,7 @@ def render(meta, peer, role=None, path=TEMPLATE):
     if peer not in PEERS:
         raise TandemError("unknown peer: %s" % peer)
     role = role or peer_role(meta, peer)
-    if role not in PAIR_ROLES:
+    if role not in session.PAIR_ROLES:
         raise TandemError("protocol is for driver or navigator, not %s" % role)
     wanted = ("shared", "role " + role, "peer " + peer)
     sections = load_template(path)

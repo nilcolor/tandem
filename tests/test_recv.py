@@ -53,6 +53,12 @@ class RecvTestCase(TandemTestCase):
         with open(os.path.join(maildir.inbox_path(self.sdir, role, "new"), name), "w", encoding="utf-8") as f:
             f.write(text)
 
+    def drop_raw_message(self, role):
+        """A message file put straight into `new/`, as if delivered, even into an ended session."""
+        path = os.path.join(maildir.inbox_path(self.sdir, role, "new"), "9999.json")
+        with open(path, "w") as f:
+            json.dump({"id": "9999", "from": "driver", "to": role, "type": "question", "body": "guard"}, f)
+
     def end_session(self):
         meta = session.load_session(self.dir)
         meta["ended"] = "2026-11-11T12:00:00Z"
@@ -109,7 +115,9 @@ class OrderingTest(RecvTestCase):
     def test_unreadable_message_is_set_aside(self):
         self.write_raw("navigator", "0001.json", "{not json")
         self.deliver("next")
-        self.assertIn("unreadable message", self.recv_error("--as", "navigator"))
+        err = self.recv_error("--as", "navigator")
+        self.assertIn("unreadable message", err)
+        self.assertIn("set aside as read; read again for the next message", err)
         self.assertEqual(self.inbox("navigator", "cur"), ["0001.json"])
         self.assertEqual(json.loads(self.recv_ok("--as", "navigator", "--json"))["body"], "next")
 
@@ -278,6 +286,10 @@ class EmptyAndWaitTest(RecvTestCase):
         timer = threading.Timer(0.3, self.end_session)
         timer.start()
         self.addCleanup(timer.cancel)
+        # Safety bound: a wait that missed the end picks this file up and fails the test.
+        guard = threading.Timer(10, self.drop_raw_message, ("navigator",))
+        guard.start()
+        self.addCleanup(guard.cancel)
         start = time.monotonic()
         self.recv_none("--as", "navigator", "--wait")
         self.assertLess(time.monotonic() - start, 5)
