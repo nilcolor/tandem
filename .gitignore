@@ -1,2 +1,3 @@
 plans/handoffs/
 !docs/plans/
+__pycache__/
