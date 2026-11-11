@@ -163,17 +163,22 @@ opens panes: the user runs each launcher in whatever terminal they like.
 
 ### Implementation: Python 3.9+, stdlib only
 
-The team runs macOS and Linux, so tandem is one Python file that runs unchanged on both, with no
-build step and nothing to install.
+The team runs macOS and Linux, so tandem is plain Python source that runs unchanged on both, with no
+build step and no dependencies.
 
-- `tandem` is an executable file with `#!/usr/bin/env python3` on PATH; no `.py` extension and no
-  shell wrapper. Hooks and agy's `unsandboxed(tandem)` rule see a plain command.
+- **Layout: a `tandem/` package plus a `bin/tandem` shim** (`#!/usr/bin/env python3`, no `.py`
+  extension) that resolves its own realpath and imports the package. Install is a clone plus a
+  symlink of `bin/tandem` into `~/.local/bin` (`make install`). Hooks and agy's
+  `unsandboxed(tandem)` rule see a plain command, and every hook is `tandem hook <event>`, so hook
+  logic is tested Python rather than generated shell.
 - **3.9 floor**, because `/usr/bin/python3` from Apple's Command Line Tools is 3.9.6 and Linux distros
   ship 3.9–3.12. `env python3` picks whichever comes first on PATH, so nothing newer may be assumed.
 - **Stdlib only** (`json`, `os.rename` for maildir delivery, `hashlib`, `argparse`, `subprocess`,
   `unittest`): no venv, no pip, no dependency on a teammate's machine.
-- If it outgrows one file, `python3 -m zipapp` packs a package into a single executable file with
-  the shebang, still with no per-OS build.
+- **No `zipapp`** (user's call). If distribution ever needs a single-file artifact instead of a clone,
+  that's the point to revisit the language and move to a compiled binary (Go, Rust, or Swift),
+  not to bundle Python. Swift caveat: Linux support exists but is a second-class target compared to
+  macOS, which matters for a mixed team.
 - Startup is ~40 ms per call, fine even for agy's `PreToolUse` hook on every `run_command`.
 - Rejected:
   - **Shell + `jq`** (the earlier plan): the watcher (pidfile supersede, following the
