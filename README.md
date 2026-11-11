@@ -236,7 +236,7 @@ All commands resolve the session as described in [Finding the session](#finding-
 | `tandem init [name] [--ticket KEY] [--task TEXT \| --task-file F] [--replace]` | create the session tree and point the repo at it |
 | `tandem send [--as R] --to R [--type T] [--reply-to ID]` | body from stdin or arg; tmp, mv to new, append to log |
 | `tandem recv [--as R] [--wait] [--timeout S] [--peek] [--json]` | pop the oldest (lowest-id) `new/` message to `cur/` and print it; `--peek` doesn't consume; `--timeout` implies `--wait`; exit 3 and `no mail for <role>` on stderr when nothing arrives; a wait gives up once the session has ended |
-| `tandem watch [--as R] [--once]` | wait for mail and ring the harness doorbell (`--once`: exit 2 on mail, for Claude's asyncRewake hook) |
+| `tandem watch [--as R] (--once [--deadline S] \| --detach)` | wait for mail and ring the harness doorbell; driver and navigator only. `--once` (Claude's asyncRewake waiter): exit 2 with the doorbell on stderr when an unread message above `peers/<role>/rung` arrives (one ring per batch, for the highest id; mail left unread isn't rung again), exit 0 at `--deadline`, when the session ends, or when a newer waiter's pid takes over `peers/<role>/watch.pid` (bare pid, removed on exit) |
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |

@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, maildir, session
+from tandem import TandemError, __version__, maildir, session, watch
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -33,6 +33,12 @@ register(
     "print the next message in a role's inbox and mark it read",
     maildir.configure_recv,
     maildir.run_recv,
+)
+register(
+    "watch",
+    "wait for mail and ring the doorbell",
+    watch.configure_watch,
+    watch.run_watch,
 )
 register(
     "log",
