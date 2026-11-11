@@ -1,12 +1,14 @@
 # tandem
 
 A pairing protocol for two coding agents working one task together. Claude Code and Antigravity CLI
-(`agy`) come first; Copilot or Codex can be swapped in later. Typical flow: the user hands over a Jira
-ticket, the driver writes a plan, the navigator challenges it, they converge or escalate to the human,
-the driver implements in checkpoints while the navigator reviews each one, and they finish with a
-summary of what was done and which decisions were made and why.
+(`agy`) come first; Copilot or Codex can be swapped in later. Typical flow: the user hands over a task
+(a Jira ticket, a brief, or just a first prompt), the driver writes a plan, the navigator challenges
+it, they converge or escalate to the human, the driver implements in checkpoints while the navigator
+reviews each one, and they finish with a summary of what was done and which decisions were made and
+why.
 
-Status: design. No code yet. This file is the decision record.
+Status: design done, v0 implementation next (Python 3.9+, stdlib only). No code yet. This file is the
+decision record.
 
 ## Hard requirements (from the user)
 
@@ -24,9 +26,10 @@ Status: design. No code yet. This file is the decision record.
 - **Navigator**: reads, reviews, challenges, helps decide. Never edits.
 - Vocabulary is pair programming, so prompts need no definitions.
 - The single-writer rule is enforced at the harness permission level, not by prompt text, because a
-  reviewer that spots a bug will "just fix it" despite instructions. Claude: deny rules for Edit and
-  Write. agy: `--mode plan` and/or a deny list passed through `--settings` (not yet verified that plan
-  mode blocks file writes in the TUI).
+  reviewer that spots a bug will "just fix it" despite instructions. Claude as navigator: deny rules
+  for Edit and Write. agy as navigator: the terminal sandbox (workspace read-only) plus a
+  `write_file(*)` deny, both passed through `--settings`; see
+  [Permissions](#permissions-autonomy-without-prompt-fatigue).
 - The navigator reviews evidence (diffs, commits, test runs it ran itself), not chat claims.
 
 ## Transport: maildir per session, no daemon
@@ -134,10 +137,10 @@ opens panes: the user runs each launcher in whatever terminal they like.
 
 | Command | Does |
 |---|---|
-| `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, permissions) into the session dir; `exec claude --settings <file> --append-system-prompt <protocol>` |
+| `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, `UserPromptSubmit` human-input log, permissions) into the session dir; `exec claude --settings <file> --append-system-prompt <protocol>` |
 | `tandem agy [--role navigator\|driver]` | writes the agy profile (sandbox + `unsandboxed(<test cmd>)` for the navigator, `--mode auto` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir>` |
 | `tandem human` | small REPL: tails the `human` inbox (escalations, questions) and sends to either role |
-| `tandem dash` (later) | web dashboard over the session dir (`log.jsonl`, `plan.md`, `decisions.md`, inboxes); not designed yet |
+| `tandem dash` (later) | web dashboard over the session dir (`log.jsonl`, `plan.md`, `decisions.md`, inboxes); not designed yet, feasibility noted in [Dashboard](#dashboard-tandem-dash-later-stdlib-is-enough) |
 
 - Defaults follow the user's preference: Claude drives, agy navigates. `--role` flips them, and the
   launcher picks the matching profile.
@@ -158,10 +161,47 @@ opens panes: the user runs each launcher in whatever terminal they like.
   the hook forces `BypassSandbox` for `tandem …` commands, and the profile carries `unsandboxed(tandem)`.
 - New peers (Copilot, Codex) are added as new launchers; the protocol, bus and skill don't change.
 
-### CLI (v0: shell + `jq`; Go single binary if it sticks)
+### Implementation: Python 3.9+, stdlib only
 
-| Command | Purpose |
-|---|---|
+The team runs macOS and Linux, so tandem is one Python file that runs unchanged on both, with no
+build step and nothing to install.
+
+- `tandem` is an executable file with `#!/usr/bin/env python3` on PATH; no `.py` extension and no
+  shell wrapper. Hooks and agy's `unsandboxed(tandem)` rule see a plain command.
+- **3.9 floor**, because `/usr/bin/python3` from Apple's Command Line Tools is 3.9.6 and Linux distros
+  ship 3.9–3.12. `env python3` picks whichever comes first on PATH, so nothing newer may be assumed.
+- **Stdlib only** (`json`, `os.rename` for maildir delivery, `hashlib`, `argparse`, `subprocess`,
+  `unittest`): no venv, no pip, no dependency on a teammate's machine.
+- If it outgrows one file, `python3 -m zipapp` packs a package into a single executable file with
+  the shebang, still with no per-OS build.
+- Startup is ~40 ms per call, fine even for agy's `PreToolUse` hook on every `run_command`.
+- Rejected:
+  - **Shell + `jq`** (the earlier plan): the watcher (pidfile supersede, following the
+    conversation ID, exiting on a stale LS address) and session resolution (hashing, sanitizing,
+    collisions) are state logic that gets fragile in shell, and there's no test tooling for it.
+  - **Go**: cross-compiling is cheap, but a release pipeline for four targets (darwin and linux on
+    arm64 and amd64), or Go on every teammate's machine, buys nothing v0 needs. Reconsider if a
+    single static artifact with no runtime assumptions becomes important.
+
+### Dashboard (`tandem dash`, later): stdlib is enough
+
+Not designed yet; this only records that Python stdlib won't block it.
+
+- **Push via SSE, not WebSockets.** `http.server.ThreadingHTTPServer` (one thread per client) with a
+  handler that sends `Content-Type: text/event-stream` and writes `data: …\n\n` + `flush()` in a loop.
+- **Resume for free**: use the byte offset in `log.jsonl` as the event `id`. The browser's
+  `EventSource` reconnects with `Last-Event-ID`, and the server seeks there and continues.
+- **Change detection by polling** (`stat` on `log.jsonl` and the inboxes every 0.5–1 s). The stdlib
+  has no inotify/FSEvents, and polling behaves the same on macOS and Linux.
+- **Browser → server is plain `POST`** (send as human, ack an escalation). The dashboard is
+  read-mostly, so a one-way stream plus POST covers it.
+- WebSockets aren't in the stdlib. A hand-rolled RFC 6455 handshake and framing is ~150 lines, and
+  bidirectional push buys nothing here.
+- Localhost only: bind `127.0.0.1`. `http.server`'s "not for production" warning doesn't apply. The
+  HTTP/1.1 limit of 6 connections per origin only bites with 7+ open dashboard tabs.
+
+### CLI
+
 All commands resolve the session as described in [Finding the session](#finding-the-session-from-any-pane);
 `--as` defaults to `TANDEM_ROLE` inside a launched harness.
 
@@ -318,19 +358,20 @@ user's own config stays untouched.
     "toolPermission": "proceed-in-sandbox",
     "enableTerminalSandbox": true,
     "permissions": {
-      "allow": ["unsandboxed(go test)", "unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)"],
+      "allow": ["unsandboxed(go test)", "unsandboxed(dip rspec)", "unsandboxed(bundle exec rspec)",
+                "unsandboxed(tandem)"],
       "deny": ["write_file(*)"]
     }
   }
   ```
 
-  Everything except tests runs read-only with no prompts; tests run on the host for real. The test
-  prefixes are per project: tandem derives them from the repo (`go.mod` → `go test`, `dip.yml` →
-  `dip rspec`, ...) or reads them from a small per-repo tandem config.
-- **Something must make agy request the bypass for test commands**, because an `unsandboxed` rule only
-  approves a bypass the agent asks for. Preferred: the tandem `PreToolUse` hook returns
-  `overwrite: {"BypassSandbox": true}` for `run_command` calls matching a test prefix (deterministic;
-  not yet verified). Fallback: the skill tells the navigator to request a bypass for tests.
+  Everything except tests and `tandem` runs read-only with no prompts; tests run on the host for
+  real. The test prefixes are per project: tandem derives them from the repo (`go.mod` → `go test`,
+  `dip.yml` → `dip rspec`, ...) or reads them from a small per-repo tandem config.
+- **The tandem `PreToolUse` hook forces the bypass** for `run_command` calls matching a test prefix
+  or `tandem`: it returns `{"decision":"allow","overwrite":{"BypassSandbox":true}}`, and
+  `{"decision":"ask"}` (the pass-through) for everything else. An `unsandboxed` rule only approves a
+  bypass the agent asks for, and the hook alone still prompts, so both are required (verified).
 - **Fallback profile (option 1)**, used if `unsandboxed` rules stop working: no sandbox,
   `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
   `command(dip rspec)`, never `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
@@ -341,7 +382,9 @@ user's own config stays untouched.
 - **Safety net for any profile**: the driver runs `git status` at each checkpoint and treats any change
   it didn't make as a navigator violation. Tests legitimately write gitignored paths (`coverage/`,
   `log/`, `tmp/`), which `git status` already ignores.
-- The doorbell goes through the sidecar and `agentapi`, not a tool call, so it never prompts.
+- The doorbell never prompts: agy's `tandem watch` is started once through `run_command` with the
+  bypass forced by the hook and approved by `unsandboxed(tandem)`, and each ring is an `agentapi`
+  call from that watcher, not a tool call.
 - Claude gets the same treatment: a per-session settings profile (allow/deny rules) plus a hook.
 
 ### Verified (2026-11-10, agy 1.5.4)
@@ -360,15 +403,14 @@ Profile `{"permissions":{"allow":["command(date)"],"deny":["write_file(*)"]}}` v
 | file tool writes `notes.txt` | denied, no prompt | `write_file(*)` blocks the file tool ("Matches user-configured deny rule") |
 
 Consequence: `write_file(*)` covers only agy's file tool. The shell is a second write channel
-(`touch`, `tee`, redirects, `sed -i`, ...). Under an allowlist that's acceptable, because anything
-unlisted prompts. Under `proceed-in-sandbox`, shell writes inside the workspace would go through
-silently, so the navigator's read-only guarantee needs one of:
+(`touch`, `tee`, redirects, `sed -i`, ...). How each profile closes it:
 
-- the tandem `PreToolUse` hook inspecting `run_command` (best effort: shell writes can't be fully
-  enumerated);
-- the sandbox, if it can make the workspace read-only (untested);
-- git as the safety net: the driver checks `git status` at each checkpoint and treats any change it
-  didn't make as a navigator violation. Cheap, and catches whatever slips through the other two.
+- **Navigator profile (sandbox)**: the sandbox makes the workspace read-only, so shell writes fail
+  ([Sandbox findings](#sandbox-findings-2026-11-10-agy-154)). Only the bypassed prefixes (tests,
+  `tandem`) run outside it, which is why the hook matches exact prefixes and never `dip` alone.
+- **Fallback profile (allowlist)**: anything unlisted prompts, so shell writes can't pass silently.
+- **Either way**, git is the safety net: the driver checks `git status` at each checkpoint and treats
+  any change it didn't make as a navigator violation.
 
 ### Sandbox findings (2026-11-10, agy 1.5.4)
 
@@ -408,8 +450,8 @@ bypass. agy's startup warning calls `unsandboxed(...)` rules **deprecated** and 
 `command(...)`, but `command(...)` rules don't bypass. `unsandboxed` is the only working mechanism today
 and may disappear in a future release.
 
-Implication for Ruby apps: `dip rspec` (Docker + dip) can't run in the sandbox at all, only bypassed or
-unsandboxed. Not yet run end to end through a bypass.
+Implication for Ruby apps: `dip rspec` (Docker + dip) can't run in the sandbox at all, only bypassed
+(verified below).
 
 **Hook contract (verified).** A `PreToolUse` hook on `run_command` must return an explicit decision:
 `"decision": ""` and `{}` both **deny** the call. `{"decision":"ask"}` defers to the normal flow (no
@@ -435,7 +477,7 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
 
 ## Protocol rules (for the `tandem` skill)
 
-- Phases: intake (Jira ticket), plan, plan review, checkpointed implement + review, summary.
+- Phases: intake (ticket, `--task` brief, or the user's first prompt), plan, plan review, checkpointed implement + review, summary.
 - **Bounded consensus.** The navigator must state risks and its strongest objection before it can
   approve. 2–3 rounds at most, then `escalate` to `human`. "Loop until agreed" is rejected because
   LLMs cave or loop.
@@ -449,6 +491,9 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
   swapped.
 
 ## agy facts (1.5.4)
+
+Everything in this file was verified on agy 1.5.4. 1.5.5 is installed now; its changelog doesn't
+touch the sandbox, permission rules, hooks or `agentapi`, but nothing has been re-run on it yet.
 
 - Config: `~/.gemini/antigravity-cli/settings.json` (permissions `allow`/`deny` with `command(...)`
   rules, `trustedWorkspaces`); shared hooks in `~/.gemini/config/hooks.json`; per-workspace hooks in
@@ -472,3 +517,5 @@ None blocking. Small items to settle while building v0:
    `send-message` doorbell (both start a turn). The human-input log hook must not record doorbells
    as human messages.
 2. Whether `plan` mode blocks running tests (low priority: the sandbox does the read-only job).
+3. Re-check the navigator profile on agy 1.5.5 without a model turn (`-p=/config`, `-p=/hooks`),
+   including whether `unsandboxed(...)` is still only deprecated, not removed.
