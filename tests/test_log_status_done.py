@@ -225,6 +225,8 @@ class PidfileTest(SessionTestCase):
     def test_liveness(self):
         self.assertTrue(session.pid_alive(os.getpid()))
         self.assertFalse(session.pid_alive(self.dead_pid()))
+        # pid 1 belongs to root: signalling it is refused, which still means it is alive.
+        self.assertTrue(session.pid_alive(1))
 
 
 class StatusTest(SessionTestCase):
@@ -297,6 +299,13 @@ class StatusTest(SessionTestCase):
                 ]
             ),
         )
+
+    def test_stale_pointer_to_an_unreadable_session(self):
+        with open(os.path.join(self.sdir, "session.json"), "w") as f:
+            f.write("{")
+        out = self.ok("status")
+        self.assertTrue(out.startswith("no active sessions\n\nstale repo pointers"), out)
+        self.assertIn("%s → %s (unreadable)" % (self.repo, self.dir), out)
 
     def test_stale_pointer_with_no_sessions(self):
         self.mark_ended()
@@ -383,6 +392,22 @@ class DoneTest(SessionTestCase):
         ):
             self.assertIn(line, text)
         self.assertNotIn("Wrap-up", text)
+
+    def test_summary_survives_a_broken_log_line_and_unreadable_decisions(self):
+        self.deliver("Plan v1", type="plan")
+        self.append_raw("not json\n[1, 2]\n")
+        self.deliver("Approved.", sender="navigator", to="driver", reply_to="1", type="review")
+        with open(os.path.join(self.sdir, "decisions.md"), "wb") as f:
+            f.write(b"\xff\xfe not utf-8\n")
+        self.ok("done")
+        text = self.summary()
+        self.assertIn("## Messages (2)\n", text)
+        self.assertIn("## Decisions\n\n_decisions.md could not be read: ", text)
+
+    def test_missing_log_reads_as_empty(self):
+        os.unlink(os.path.join(self.sdir, "log.jsonl"))
+        self.assertEqual(session.read_log(self.sdir), [])
+        self.assertEqual(session.log_lines(self.sdir, 10), ([], 10))
 
     def test_long_subject_capped(self):
         self.deliver("\n   \n" + "x" * 300)

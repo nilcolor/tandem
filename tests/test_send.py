@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 from unittest import mock
@@ -268,6 +269,12 @@ class SendErrorTest(SendTestCase):
         err = self.send_error("--as", "driver", "--to", "navigator", "x")
         self.assertIn("has ended", err)
         self.assert_nothing_sent()
+
+    def test_missing_inbox(self):
+        shutil.rmtree(os.path.join(self.sdir, "inbox", "navigator"))
+        err = self.send_error("--as", "driver", "--to", "navigator", "x")
+        self.assertIn("has no navigator inbox", err)
+        self.assertEqual(self.messages_logged(), [])
 
     def test_deliver_rechecks_ended_under_the_lock(self):
         meta = session.load_session(self.dir)

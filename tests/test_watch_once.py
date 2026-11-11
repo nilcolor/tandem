@@ -231,6 +231,21 @@ class ExitZeroTest(WatchTestCase):
         self.later(lambda: os.rename(self.sdir, os.path.join(sessions, "gone")))
         self.assertEqual(self.watch("--deadline", "5")[0], 0)
 
+    def test_unreadable_session_ends_the_wait(self):
+        def corrupt():
+            with open(os.path.join(self.sdir, "session.json"), "w") as f:
+                f.write("{")
+
+        self.later(corrupt)
+        start = time.monotonic()
+        self.assertEqual(self.watch("--deadline", "5"), (0, "", ""))
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertFalse(os.path.exists(self.pidfile()))
+
+    def test_without_a_deadline_it_waits_for_mail(self):
+        self.later(self.deliver, delay=0.2)
+        self.assertEqual(self.watch(), (2, "", watch.doorbell("driver") + "\n"))
+
 
 class PidfileTest(WatchTestCase):
     def test_pidfile_names_the_waiter_while_it_waits(self):

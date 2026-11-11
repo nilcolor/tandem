@@ -417,6 +417,18 @@ class FailureTest(AgyWatchTestCase):
 
         self.assertIn("timed out", watch.send_doorbell(self.exe, "c", "x", {}, run=slow))
 
+    def test_failure_reason_falls_back_to_stderr(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 3, stdout="not json\n", stderr="\nLS refused the call\n")
+
+        self.assertEqual(watch.send_doorbell(self.exe, "c", "x", {}, run=run), "exit 3: LS refused the call")
+
+    def test_plain_text_stdout_with_exit_0_is_success(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, stdout="sent\n", stderr="")
+
+        self.assertIsNone(watch.send_doorbell(self.exe, "c", "x", {}, run=run))
+
 
 class ExitTest(AgyWatchTestCase):
     def test_ls_gone_exits_and_releases_the_pidfile(self):

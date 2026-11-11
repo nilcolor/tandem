@@ -323,6 +323,14 @@ class RealExecTest(LaunchTestCase):
         # exec keeps the launcher's pid, so the claim tracks the running harness.
         self.assertEqual(session.load_session(self.dir)["claims"]["claude"]["pid"], seen["pid"])
 
+    def test_repo_gone(self):
+        argv, env, _ = launch_claude.prepare(self.meta)
+        cwd = os.getcwd()
+        with self.assertRaises(TandemError) as caught:
+            session.exec_harness(argv, env, os.path.join(self.tmp, "no-such-repo"))
+        self.assertIn("cannot enter", str(caught.exception))
+        self.assertEqual(os.getcwd(), cwd)
+
     def test_claude_missing(self):
         os.environ["PATH"] = self.bin_dir(False)
         result = self.run_shim("claude", cwd=self.repo)

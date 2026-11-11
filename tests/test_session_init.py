@@ -323,6 +323,13 @@ class InitErrorsAndReplaceTest(InitTestCase):
         self.assertEqual(err, "tandem: not inside a git repository\n")
         self.assertFalse(os.path.exists(paths.tandem_home()))
 
+    def test_git_missing(self):
+        os.environ["PATH"] = os.path.join(self.tmp, "empty-bin")
+        code, out, err = self.init()
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "tandem: git not found on PATH\n")
+        self.assertFalse(os.path.exists(paths.tandem_home()))
+
     def test_active_session_blocks_second_init(self):
         self.init_ok()
         code, out, err = self.init("second")

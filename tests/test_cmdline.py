@@ -283,6 +283,14 @@ class WriteGateTest(unittest.TestCase):
     def test_unreadable_is_not_flagged(self):
         self.assertIsNone(self.reason("echo 'unterminated"))
 
+    def test_redirect_without_a_target_is_gated(self):
+        for text in ("echo hi >", "cat > ; ls", "echo > > x"):
+            self.assertEqual(self.reason(text), "redirect >", text)
+
+    def test_assignments_and_bare_wrappers_are_not_writes(self):
+        for text in ("FOO=1", "sudo", "env -i", "FOO=1 && ls"):
+            self.assertIsNone(self.reason(text), text)
+
 
 if __name__ == "__main__":
     unittest.main()
