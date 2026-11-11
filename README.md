@@ -27,8 +27,8 @@ decision record.
 - Vocabulary is pair programming, so prompts need no definitions.
 - The single-writer rule is enforced at the harness permission level, not by prompt text, because a
   reviewer that spots a bug will "just fix it" despite instructions. Claude as navigator: deny rules
-  for Edit and Write. agy as navigator: the terminal sandbox (workspace read-only) plus a
-  `write_file(*)` deny, both passed through `--settings`; see
+  for Edit and Write. agy as navigator: a `write_file(*)` deny plus the tandem `PreToolUse` write
+  gate on shell commands, because agy 1.5.5's sandbox no longer makes the workspace read-only; see
   [Permissions](#permissions-autonomy-without-prompt-fatigue).
 - The navigator reviews evidence (diffs, commits, test runs it ran itself), not chat claims.
 
@@ -186,9 +186,10 @@ opens panes: the user runs each launcher in whatever terminal they like.
   are namespaced `<plugin>:<skill>`). Checked with print-mode `/hooks`, `/skills` and `/plugin list`
   (no model turn), and for rules with marker words agy reported from context, with no tool calls in
   the event stream. Nothing is installed globally and nothing is written into the target repo.
-- Consequence: the added session dir is part of agy's **workspace**, which the sandbox makes
-  read-only. The navigator's `tandem send/recv` writes there, so it needs the same treatment as tests:
-  the hook forces `BypassSandbox` for `tandem …` commands, and the profile carries `unsandboxed(tandem)`.
+- Consequence: `tandem …` commands must run outside the sandbox, the same as tests. The sandbox
+  blocks reads outside the workspace, and `tandem` needs the shim and package from its checkout plus
+  `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox too. The hook
+  forces `BypassSandbox` for `tandem …` commands, and the profile carries `unsandboxed(tandem)`.
 - New peers (Copilot, Codex) are added as new launchers; the protocol, bus and skill don't change.
 
 ### Implementation: Python 3.9+, stdlib only
@@ -401,19 +402,29 @@ user's own config stays untouched.
   }
   ```
 
-  Everything except tests and `tandem` runs read-only with no prompts; tests run on the host for
-  real. The test prefixes are per project: tandem derives them from the repo (`go.mod` → `go test`,
-  `dip.yml` → `dip rspec`, ...) or reads them from a small per-repo tandem config.
-- **The tandem `PreToolUse` hook forces the bypass** for `run_command` calls matching a test prefix
-  or `tandem`: it returns `{"decision":"allow","overwrite":{"BypassSandbox":true}}`, and
-  `{"decision":"ask"}` (the pass-through) for everything else. An `unsandboxed` rule only approves a
-  bypass the agent asks for, and the hook alone still prompts, so both are required (verified).
+  Commands run in the sandbox with no prompts (no network, nothing outside the workspace); tests
+  and `tandem` run on the host for real. The test prefixes are per project: tandem derives them from
+  the repo (`go.mod` → `go test`, `dip.yml` → `dip rspec`, ...) or takes `--test-cmd` at `init`.
+- **The tandem `PreToolUse` hook** decides each `run_command` call, in this order:
+  1. a test prefix or `tandem` (with any quoted text treated as literal) →
+     `{"decision":"allow","overwrite":{"BypassSandbox":true}}`. An `unsandboxed` rule only approves a
+     bypass the agent asks for, and the hook alone still prompts, so both are required (verified on
+     1.5.4 and 1.5.5).
+  2. **write gate**: a command that looks like a write (redirects `>`/`>>`, `tee`, `touch`, `rm`,
+     `mv`, `cp`, `mkdir`, `ln`, `chmod`, `sed -i`, `perl -i`, `truncate`, `dd`, `git` subcommands
+     that change the tree or refs such as `commit`, `checkout`, `reset`, `restore`, `stash`, `apply`,
+     `merge`, `rebase`, `clean`, `add`, `rm`, `mv`) → `force_ask`, a visible prompt the user answers.
+     Needed because agy 1.5.5's sandbox lets shell commands write the workspace (see
+     [the 1.5.5 live probe](#agy-155-live-probe-2026-11-11)). It's best effort, since writes through
+     `python3 -c` or a script can't all be spotted; `git status` stays the net.
+  3. anything else → `{"decision":"ask"}`, the pass-through, which runs sandboxed with no prompt.
 - **Fallback profile (option 1)**, used if `unsandboxed` rules stop working: no sandbox,
   `request-review`, a tight allowlist (read-only git, `tandem`, the exact test commands such as
   `command(dip rspec)`, never `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
   tandem checks at startup that a bypass rule still works and switches to this profile if it doesn't.
 - **Driver profile (when agy drives)**: `--mode auto` plus the tandem and git allowlist, no sandbox
-  (the sandbox makes the workspace read-only, so a sandboxed driver can't work). Prompts are left only
+  (the driver needs network and the full toolchain; on 1.5.4 the sandbox also made the workspace
+  read-only). Prompts are left only
   for irreversible actions, which the user wants to see anyway.
 - **Safety net for any profile**: the driver runs `git status` at each checkpoint and treats any change
   it didn't make as a navigator violation. Tests legitimately write gitignored paths (`coverage/`,
@@ -441,9 +452,10 @@ Profile `{"permissions":{"allow":["command(date)"],"deny":["write_file(*)"]}}` v
 Consequence: `write_file(*)` covers only agy's file tool. The shell is a second write channel
 (`touch`, `tee`, redirects, `sed -i`, ...). How each profile closes it:
 
-- **Navigator profile (sandbox)**: the sandbox makes the workspace read-only, so shell writes fail
-  ([Sandbox findings](#sandbox-findings-2026-11-10-agy-154)). Only the bypassed prefixes (tests,
-  `tandem`) run outside it, which is why the hook matches exact prefixes and never `dip` alone.
+- **Navigator profile (sandbox)**: on 1.5.4 the sandbox made the workspace read-only, so shell
+  writes failed. On 1.5.5 it doesn't, so the hook's write gate turns write-looking commands into a
+  visible prompt. Only the bypassed prefixes (tests, `tandem`) run outside the sandbox, which is why
+  the hook matches exact prefixes and never `dip` alone.
 - **Fallback profile (allowlist)**: anything unlisted prompts, so shell writes can't pass silently.
 - **Either way**, git is the safety net: the driver checks `git status` at each checkpoint and treats
   any change it didn't make as a navigator violation.
@@ -609,11 +621,40 @@ All with print-mode slash commands (`num_turns: 0`), so no model turn was spent.
   On 1.5.4 the notice was read as "deprecated" and the bypass still worked. The 1.5.5 wording says
   the rules are **ignored**, and the changelog doesn't mention the change. If that's literal, the
   navigator's default profile no longer bypasses the sandbox on 1.5.5 and the fallback profile has
-  to become the default. Only a live run can tell (Task 17, first check).
+  to become the default. **Settled by the [live probe](#agy-155-live-probe-2026-11-11): the rules
+  still work.**
 - The model-facing sandbox description in the 1.5.5 binary says standard sandbox mode "has full
   read/write access to your workspace", while on 1.5.4 a sandboxed `touch` in the workspace was
-  blocked. Also live-only; if the workspace became writable, the navigator's single-writer rule
-  rests on `write_file(*)` plus the driver's `git status` check, which don't close the shell channel.
+  blocked. **Confirmed by the [live probe](#agy-155-live-probe-2026-11-11): the workspace is
+  writable**, hence the hook's write gate.
+
+### agy 1.5.5 live probe (2026-11-11)
+
+One interactive agy 1.5.5 session in a throwaway git workspace, launched with
+`--prompt-interactive=<text>` and a profile of `proceed-in-sandbox`, sandbox on,
+allow `unsandboxed(python3 loop.py)`, deny `write_file(*)`. `loop.py` binds a loopback socket and
+connects to it. `BypassSandbox` values were read from the conversation's transcript.
+
+| # | Command | Bypass requested | Result |
+|---|---|---|---|
+| 1 | `touch p1.txt` (in the workspace) | no | **ran, file created**: the workspace is writable in the 1.5.5 sandbox |
+| 2 | `python3 loop.py` | yes | ran outside, **no prompt**: `LOOPBACK-OK` |
+| 3 | `python3 loop.py 'a; b'` | yes | ran outside, no prompt: the quoted `;` wasn't split into a second command |
+| 4 | `python3 loop.py` | no | failed: loopback is still blocked in the sandbox |
+| 5 | `python3 -c "print(42)"` (no rule covers it) | yes | **bypass prompt** (declined) |
+| 6 | `touch ~/code/tmp/outside155.txt` | no | blocked: `Operation not permitted` |
+
+Conclusions:
+
+- **`unsandboxed(<prefix>)` still works on 1.5.5**, selectively: rows 2–3 pass silently, row 5
+  prompts. The binary's "ignored and grant nothing" notice must apply to malformed rules only.
+- **The sandbox no longer makes the workspace read-only** (row 1). Network, loopback and paths
+  outside the workspace are still blocked (rows 4, 6). The navigator's read-only rule now rests on
+  `write_file(*)`, the hook's write gate, and the driver's `git status` check.
+- Quoted message bodies passed to a bypassed `tandem send` are safe from agy's command splitting
+  (row 3).
+- `--prompt-interactive=<text>` starts the first turn in the TUI, so launchers can use it.
+- Declining a prompt interrupts the whole turn, so later tool calls in it don't run.
 
 ### Claude Code permission rules (docs, 2026-11-11)
 
@@ -639,16 +680,16 @@ None blocking the code. Settle while building v0:
 1. Whether agy's `lastUserInput` on `PreInvocation` distinguishes a human prompt from a
    `send-message` doorbell (both start a turn). The human-input log hook must not record doorbells
    as human messages.
-2. Whether `plan` mode blocks running tests (low priority: the sandbox does the read-only job).
+2. Whether `plan` mode blocks running tests and shell writes. Worth a look now that the 1.5.5
+   sandbox no longer keeps the workspace read-only.
 3. ~~Re-check the navigator profile on agy 1.5.5 without a model turn~~: done, see
    [agy 1.5.5 re-check](#agy-155-re-check-2026-11-11). The profile loads, but print mode can't show
    whether `unsandboxed(...)` still works, which became item 4.
-4. **Does agy 1.5.5 still honour `unsandboxed(...)`?** Its startup notice says the rules are
-   "ignored and grant nothing". First live check in Task 17: the navigator profile running
-   `tandem status` with the hook forcing `BypassSandbox`. If it prompts, make the fallback profile
-   the default and keep the sandboxed one behind `--profile`.
-5. **Is the workspace still read-only inside the 1.5.5 sandbox?** Live check in Task 17: sandboxed
-   `touch` in the repo. If it's writable, the sandboxed navigator profile loses its main guarantee.
+4. ~~Does agy 1.5.5 still honour `unsandboxed(...)`?~~ Yes, see
+   [the 1.5.5 live probe](#agy-155-live-probe-2026-11-11).
+5. ~~Is the workspace still read-only inside the 1.5.5 sandbox?~~ No. The navigator profile gains
+   the hook's write gate (`force_ask` for write-looking commands). Whether `force_ask` shows a prompt
+   under `proceed-in-sandbox` gets checked live in Task 17.
 6. What the `tandem agy` self-check can test. `/config` doesn't validate rule kinds, so it can only
    confirm the profile parses. The honest signal is the agy version: record versions where Task 17
    passed and treat any other version as unverified (warn, or fall back).
