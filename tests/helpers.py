@@ -37,6 +37,9 @@ class TandemTestCase(unittest.TestCase):
         self.addCleanup(restore)
         for key in _CLEARED_ENV:
             os.environ.pop(key, None)
+        # A suite run from an agy pane would otherwise reach the real language server.
+        for key in [k for k in os.environ if k.startswith("ANTIGRAVITY_")]:
+            del os.environ[key]
 
         self.home = os.path.join(self.tmp, "home")
         self.tandem_home = os.path.join(self.tmp, "tandem-home")
