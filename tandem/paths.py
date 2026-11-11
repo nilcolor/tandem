@@ -15,3 +15,11 @@ def shim_path():
     # The checkout's own shim, not the ~/.local/bin symlink: generated hook
     # commands must keep working whether or not `make install` was run.
     return os.path.join(REPO_ROOT, "bin", "tandem")
+
+
+def sessions_dir():
+    return os.path.join(tandem_home(), "sessions")
+
+
+def repos_dir():
+    return os.path.join(tandem_home(), "repos")

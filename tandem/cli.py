@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__
+from tandem import TandemError, __version__, session
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -14,6 +14,14 @@ def register(name, help, configure, run):
     if any(c.name == name for c in COMMANDS):
         raise ValueError("duplicate command: %s" % name)
     COMMANDS.append(Command(name, help, configure, run))
+
+
+register(
+    "init",
+    "create a session for this repo and point the repo at it",
+    session.configure_init,
+    session.run_init,
+)
 
 
 class _Parser(argparse.ArgumentParser):
