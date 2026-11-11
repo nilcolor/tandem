@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import time
 
 from tandem import TandemError, session
 
@@ -9,6 +10,9 @@ TYPES = ("plan", "review_request", "review", "question", "answer", "decision", "
 EXPECTS_REPLY = frozenset(("plan", "review_request", "question", "escalate"))
 
 _MESSAGE_FILE = re.compile(r"^(\d{4,})\.json$")
+
+NO_MAIL = 3
+POLL_INTERVAL = 0.5
 
 
 def format_id(n):
@@ -27,20 +31,31 @@ def inbox_path(sdir, role, sub):
     return os.path.join(sdir, "inbox", role, sub)
 
 
+def _inbox_names(sdir, role, sub):
+    """Message filenames in one inbox dir, lowest id first.
+
+    Sorted by number, not text: ids widen past 9999 and "10000" < "9999".
+    """
+    try:
+        names = os.listdir(inbox_path(sdir, role, sub))
+    except FileNotFoundError:
+        return []
+    found = []
+    for name in names:
+        m = _MESSAGE_FILE.match(name)
+        if m:
+            found.append((int(m.group(1)), name))
+    return [name for _, name in sorted(found)]
+
+
 def _message_ids(sdir):
     """Ids of every delivered message, in any inbox, read or not."""
-    ids = set()
-    for role in session.ROLES:
-        for sub in ("new", "cur"):
-            try:
-                names = os.listdir(inbox_path(sdir, role, sub))
-            except FileNotFoundError:
-                continue
-            for name in names:
-                m = _MESSAGE_FILE.match(name)
-                if m:
-                    ids.add(int(m.group(1)))
-    return ids
+    return {
+        int(_MESSAGE_FILE.match(name).group(1))
+        for role in session.ROLES
+        for sub in ("new", "cur")
+        for name in _inbox_names(sdir, role, sub)
+    }
 
 
 def check_role(role, flag):
@@ -134,11 +149,11 @@ def _resolve_commit(meta, rev):
     return sha
 
 
-def sender_role(args):
+def own_role(args, what):
     role = args.as_role or os.environ.get("TANDEM_ROLE")
     if not role:
-        raise TandemError("no sender role: pass --as or run inside a tandem launcher (TANDEM_ROLE)")
-    return role
+        raise TandemError("no %s role: pass --as or run inside a tandem launcher (TANDEM_ROLE)" % what)
+    return check_role(role, "--as")
 
 
 def _read_body(args):
@@ -164,7 +179,7 @@ def configure_send(p):
 
 
 def run_send(args):
-    sender = check_role(sender_role(args), "--as")
+    sender = own_role(args, "sender")
     meta = session.resolve_args(args)
     if not session.is_active(meta):
         raise TandemError("session %s has ended" % meta["dir"])
@@ -180,4 +195,118 @@ def run_send(args):
     )
     msg = deliver(meta, envelope)
     print("sent %s to %s" % (msg["id"], msg["to"]))
+    return 0
+
+
+def _read_message(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as exc:
+        raise TandemError("unreadable message %s: %s" % (path, exc))
+
+
+def peek(sdir, role):
+    """The lowest-id unread message for `role`, left in `new/`; None if there is none."""
+    new_dir = inbox_path(sdir, role, "new")
+    for name in _inbox_names(sdir, role, "new"):
+        path = os.path.join(new_dir, name)
+        if os.path.exists(path):
+            return _read_message(path)
+    return None
+
+
+def pop(sdir, role):
+    """Move the lowest-id unread message for `role` to `cur/` and return it; None if there is none.
+
+    The rename is the claim: of two readers racing for one file exactly one
+    rename succeeds, and the loser tries the next file.
+    """
+    new_dir = inbox_path(sdir, role, "new")
+    cur_dir = inbox_path(sdir, role, "cur")
+    for name in _inbox_names(sdir, role, "new"):
+        dest = os.path.join(cur_dir, name)
+        try:
+            os.rename(os.path.join(new_dir, name), dest)
+        except FileNotFoundError:
+            continue
+        return _read_message(dest)
+    return None
+
+
+def render(msg):
+    """Header line, refs, blank line, body."""
+    head = "#%s %s → %s  %s" % (msg.get("id"), msg.get("from"), msg.get("to"), msg.get("type"))
+    notes = []
+    if msg.get("reply_to"):
+        notes.append("reply to #%s" % msg["reply_to"])
+    if msg.get("expects_reply"):
+        notes.append("expects reply")
+    if notes:
+        head += "  " + ", ".join(notes)
+    lines = [head]
+    refs = msg.get("refs") or {}
+    if refs.get("commit"):
+        lines.append("commit: %s" % refs["commit"])
+    if refs.get("files"):
+        lines.append("files: %s" % ", ".join(refs["files"]))
+    lines.append("")
+    lines.append(msg.get("body") or "")
+    return "\n".join(lines)
+
+
+def receive(meta, role, consume=True, wait=False, timeout=None):
+    """Next message for `role`, or None when there is none (after waiting, if asked).
+
+    A wait gives up once the session has ended, since `deliver` refuses ended
+    sessions and nothing more can arrive.
+    """
+    sdir = session.session_path(meta["dir"])
+    if not os.path.isdir(inbox_path(sdir, role, "new")):
+        raise TandemError("session %s has no %s inbox" % (meta["dir"], role))
+    take = pop if consume else peek
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        msg = take(sdir, role)
+        if msg is not None or not wait:
+            return msg
+        if not session.is_active(session.load_session(meta["dir"])):
+            return None
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            time.sleep(min(POLL_INTERVAL, left))
+        else:
+            time.sleep(POLL_INTERVAL)
+
+
+def _seconds(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise TandemError("--timeout must be a number of seconds, not %r" % text)
+    if value < 0 or value != value:
+        raise TandemError("--timeout must not be negative")
+    return value
+
+
+def configure_recv(p):
+    p.add_argument("--as", dest="as_role", metavar="ROLE", help="whose inbox to read (default: $TANDEM_ROLE)")
+    p.add_argument("--peek", action="store_true", help="print the next message without consuming it")
+    p.add_argument("--wait", action="store_true", help="poll until a message arrives")
+    p.add_argument("--timeout", metavar="S", help="with --wait, give up after S seconds (implies --wait)")
+    p.add_argument("--json", action="store_true", help="print the raw envelope")
+
+
+def run_recv(args):
+    role = own_role(args, "reader")
+    timeout = _seconds(args.timeout) if args.timeout is not None else None
+    meta = session.resolve_args(args)
+    msg = receive(meta, role, consume=not args.peek, wait=args.wait or timeout is not None, timeout=timeout)
+    if msg is None:
+        # stderr, so stdout carries only messages and `--json` output stays parseable.
+        print("no mail for %s" % role, file=sys.stderr)
+        return NO_MAIL
+    print(json.dumps(msg, ensure_ascii=False) if args.json else render(msg))
     return 0

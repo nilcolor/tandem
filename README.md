@@ -132,6 +132,8 @@ where they are already looking; the skill requires it.
 
 Types: `plan`, `review_request`, `review`, `question`, `answer`, `decision`, `escalate`, `done`.
 `expects_reply` plus a `recv --timeout` that escalates to `human` prevents mutual-wait deadlock.
+`recv` itself never escalates: on timeout it exits 3, and the protocol tells the waiting agent to
+escalate, so the escalation carries the agent's own account of what it is waiting for.
 
 - Ids are per session, shared by all three inboxes, gap-free: the next id is one above the highest
   message in any `new/` or `cur/`, allocated under the session's `flock`, so `reply_to` names one
@@ -227,7 +229,7 @@ All commands resolve the session as described in [Finding the session](#finding-
 |---|---|
 | `tandem init [name] [--ticket KEY] [--task TEXT \| --task-file F] [--replace]` | create the session tree and point the repo at it |
 | `tandem send [--as R] --to R [--type T] [--reply-to ID]` | body from stdin or arg; tmp, mv to new, append to log |
-| `tandem recv [--as R] [--wait] [--timeout S] [--peek]` | pop the oldest `new/` message to `cur/` and print it; `--peek` doesn't consume |
+| `tandem recv [--as R] [--wait] [--timeout S] [--peek] [--json]` | pop the oldest (lowest-id) `new/` message to `cur/` and print it; `--peek` doesn't consume; `--timeout` implies `--wait`; exit 3 and `no mail for <role>` on stderr when nothing arrives; a wait gives up once the session has ended |
 | `tandem watch [--as R] [--once]` | wait for mail and ring the harness doorbell (`--once`: exit 2 on mail, for Claude's asyncRewake hook) |
 | `tandem log` | dump `log.jsonl` |
 | `tandem status` | active sessions, pending counts per inbox, last message per role, stale pointers |

@@ -28,6 +28,12 @@ register(
     maildir.configure_send,
     maildir.run_send,
 )
+register(
+    "recv",
+    "print the next message in a role's inbox and mark it read",
+    maildir.configure_recv,
+    maildir.run_recv,
+)
 
 
 class _Parser(argparse.ArgumentParser):
