@@ -133,6 +133,14 @@ where they are already looking; the skill requires it.
 Types: `plan`, `review_request`, `review`, `question`, `answer`, `decision`, `escalate`, `done`.
 `expects_reply` plus a `recv --timeout` that escalates to `human` prevents mutual-wait deadlock.
 
+- Ids are per session, shared by all three inboxes, gap-free: the next id is one above the highest
+  message in any `new/` or `cur/`, allocated under the session's `flock`, so `reply_to` names one
+  message whichever inbox it sits in. `--reply-to` must name an existing message.
+- `--type` defaults to `answer` with `--reply-to`, else `question`. A reply that defaulted to
+  `question` would expect a reply back, and two agents would answer each other's answers forever.
+- `--commit` is resolved in the session's repo and stored as a 12-char sha, so `HEAD` keeps meaning
+  the commit it named when the message was sent. `--file` paths are stored as given.
+
 ### Launchers: `tandem <peer>` is the per-peer adapter
 
 Each peer needs a specific launch: a permission profile, hooks, the doorbell protocol in its

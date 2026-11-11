@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, session
+from tandem import TandemError, __version__, maildir, session
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -21,6 +21,12 @@ register(
     "create a session for this repo and point the repo at it",
     session.configure_init,
     session.run_init,
+)
+register(
+    "send",
+    "deliver a message to a role's inbox and log it",
+    maildir.configure_send,
+    maildir.run_send,
 )
 
 
