@@ -516,6 +516,14 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
 - Summary is built from `decisions.md` plus `log.jsonl`.
 - The skill never touches transport details. Only a thin per-peer adapter does, so peers can be
   swapped.
+- The rules live in `tandem/templates/protocol.md`: shared rules plus one section per role and per
+  peer. `tandem/protocol.py` renders them with the session's values for Claude's
+  `--append-system-prompt` and agy's `.agents/rules/AGENTS.md`, so both peers get the same text.
+- Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: the
+  navigator's agy sandbox only bypasses plain commands, and both harnesses' permission rules match
+  the command text.
+- The driver ends a session only after the user confirms, and puts its narrative in `decisions.md`
+  and its `done` message, because `tandem done` regenerates `summary.md`.
 
 ## agy facts (1.5.4, config re-checked on 1.5.5)
 
