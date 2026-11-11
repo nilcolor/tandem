@@ -629,3 +629,90 @@ def run_done(args):
     meta = end_session(resolve_args(args))
     print(os.path.join(session_path(meta["dir"]), "summary.md"))
     return 0
+
+
+PAIR_ROLES = ("driver", "navigator")
+
+
+def role_of(meta, peer):
+    """The pair role `peer` holds in `meta`'s session, or None."""
+    roles = meta.get("roles") or DEFAULT_ROLES
+    for role in PAIR_ROLES:
+        if roles.get(role) == peer:
+            return role
+    return None
+
+
+def live_claim(meta, peer):
+    """`peer`'s claim record while the process that made it still runs, else None.
+
+    A launcher claims with its own pid and then execs the harness, which keeps
+    that pid, so a claim lasts exactly as long as the harness does.
+    """
+    claim = (meta.get("claims") or {}).get(peer)
+    if not isinstance(claim, dict):
+        return None
+    pid = claim.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or not pid_alive(pid):
+        return None
+    return claim
+
+
+def claim_role(dir_name, peer, role=None, pid=None):
+    """Make `peer` hold `role` (default: the role it holds now); returns the updated session.json.
+
+    Taking the other peer's role swaps the two, unless that peer is running
+    under a live claim of it. Shared by both launchers.
+    """
+    if role is not None and role not in PAIR_ROLES:
+        raise TandemError("role must be one of %s, not %r" % (", ".join(PAIR_ROLES), role))
+    pid = os.getpid() if pid is None else pid
+    sdir = session_path(dir_name)
+    with locked(sdir):
+        meta = load_session(dir_name)
+        if meta is None:
+            raise TandemError("session %s no longer exists" % dir_name)
+        if not is_active(meta):
+            raise TandemError("session %s has ended; run `tandem init` to start a new one" % dir_name)
+        roles = dict(meta.get("roles") or DEFAULT_ROLES)
+        held = role_of(meta, peer)
+        role = role or held
+        if role is None:
+            raise TandemError("%s holds no role in session %s; pass --role driver|navigator" % (peer, dir_name))
+        holder = roles.get(role)
+        if holder != peer:
+            # Swapping a running peer's role would leave its harness on the wrong protocol.
+            claim = live_claim(meta, holder) if holder else None
+            if claim is not None:
+                raise TandemError(
+                    "%s is already the %s in session %s (pid %d); quit it first or pick the other role"
+                    % (holder, role, dir_name, claim["pid"])
+                )
+            roles[role] = peer
+            if held is not None:
+                if holder:
+                    roles[held] = holder
+                else:
+                    roles.pop(held)
+        claims = dict(meta.get("claims") or {})
+        claims[peer] = {"role": role, "pid": pid, "ts": iso(_now())}
+        meta["roles"] = roles
+        meta["claims"] = claims
+        save_session(meta)
+        event = {"kind": "event", "ts": claims[peer]["ts"], "event": "role_claimed", "peer": peer, "role": role}
+        if held is not None and held != role:
+            event["was"] = held
+        write_log_line(sdir, event)
+    return meta
+
+
+def exec_harness(argv, env, cwd):
+    """Replace this process with the harness; launchers take this as their injectable `exec`."""
+    try:
+        os.chdir(cwd)
+    except OSError as exc:
+        raise TandemError("cannot enter %s: %s" % (cwd, exc))
+    try:
+        os.execvpe(argv[0], argv, env)
+    except OSError as exc:
+        raise TandemError("cannot run %s: %s" % (argv[0], exc))

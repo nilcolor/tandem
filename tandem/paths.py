@@ -1,4 +1,5 @@
 import os
+import shlex
 
 _PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT = os.path.dirname(_PACKAGE_DIR)
@@ -15,6 +16,12 @@ def shim_path():
     # The checkout's own shim, not the ~/.local/bin symlink: generated hook
     # commands must keep working whether or not `make install` was run.
     return os.path.join(REPO_ROOT, "bin", "tandem")
+
+
+def shim_command(*args):
+    """A shell command line running the shim with `args`, for generated hook configs."""
+    shim = "'%s'" % shim_path().replace("'", "'\\''")
+    return " ".join([shim] + [shlex.quote(a) for a in args])
 
 
 def sessions_dir():

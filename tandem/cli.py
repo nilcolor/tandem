@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, hooks, maildir, session, watch
+from tandem import TandemError, __version__, hooks, launch_claude, maildir, session, watch
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -57,6 +57,12 @@ register(
     "write summary.md, end the session and clear the repo pointer",
     session.configure_done,
     session.run_done,
+)
+register(
+    "claude",
+    "launch Claude Code as this session's driver or navigator (execs claude)",
+    launch_claude.configure_claude,
+    launch_claude.run_claude,
 )
 register(
     "hook",

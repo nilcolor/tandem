@@ -5,7 +5,7 @@ from tandem import TandemError, session, watch
 
 TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "protocol.md")
 PEERS = {"claude": "Claude Code", "agy": "agy"}
-PAIR_ROLES = ("driver", "navigator")
+PAIR_ROLES = session.PAIR_ROLES
 # agy caps each rules file at 24 KB; the brief is the only unbounded value, so it is cut well
 # below that and the rest of the protocol always fits under 16 KB.
 TASK_CAP = 6000
@@ -34,10 +34,9 @@ def load_template(path=TEMPLATE):
 
 
 def peer_role(meta, peer):
-    roles = meta.get("roles") or session.DEFAULT_ROLES
-    for role in PAIR_ROLES:
-        if roles.get(role) == peer:
-            return role
+    role = session.role_of(meta, peer)
+    if role is not None:
+        return role
     raise TandemError("%s holds no role in session %s" % (peer, meta.get("dir")))
 
 

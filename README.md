@@ -158,13 +158,22 @@ opens panes: the user runs each launcher in whatever terminal they like.
 
 | Command | Does |
 |---|---|
-| `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, `UserPromptSubmit` human-input log, permissions) into the session dir; `exec claude --settings <file> --append-system-prompt <protocol>` |
+| `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, `UserPromptSubmit` human-input log, permissions) into the session dir; `exec claude --add-dir <session-dir> --settings <file> --append-system-prompt <protocol> [extra] -- <tandem: prompt>` |
 | `tandem agy [--role navigator\|driver]` | writes the agy profile (sandbox + `unsandboxed(<test cmd>)` for the navigator, `--mode auto` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir>` |
 | `tandem human` | small REPL: tails the `human` inbox (escalations, questions) and sends to either role |
 | `tandem dash` (later) | web dashboard over the session dir (`log.jsonl`, `plan.md`, `decisions.md`, inboxes); not designed yet, feasibility noted in [Dashboard](#dashboard-tandem-dash-later-stdlib-is-enough) |
 
 - Defaults follow the user's preference: Claude drives, agy navigates. `--role` flips them, and the
   launcher picks the matching profile.
+- **Role claims.** A launcher records `claims.<peer> = {role, pid, ts}` in `session.json` and logs a
+  `role_claimed` event before it `exec`s. `exec` keeps the pid, so a claim lives exactly as long as
+  the harness. `--role` taking the other peer's role swaps the two in `roles`, unless that peer has a
+  live claim (then it's an error: quit it first). A dead claim is simply released, so relaunching
+  after a crash never deadlocks. A peer launched without `--role` takes the role `roles` gives it.
+- `tandem claude` adds the session dir with `--add-dir`, so Claude reads `plan.md`, reviews and the
+  log (and the driver edits `plan.md`/`decisions.md`) without asking for an outside-workspace path.
+  Claude's own arguments go after `--` (`tandem claude -- --model opus`); tandem puts its initial
+  `tandem:` prompt after a second `--`, so a variadic flag such as `--allowed-tools` can't swallow it.
 - Launchers export `TANDEM_SESSION` and `TANDEM_ROLE`, so hooks and `tandem send/recv` know who they
   are without flags.
 - **Protocol parity.** Both peers get the doorbell protocol and role rules from launch-time,
