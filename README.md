@@ -84,8 +84,13 @@ Resolution order, first match wins:
   then all sessions; among several matches, the single active one wins.
 - **One active session per checkout.** `tandem init` refuses while one is active unless `--replace`:
   one working tree can't take two drivers anyway.
-- **Ending.** `tandem done` writes the summary and clears the repo pointer. A stale pointer (a session
-  never closed) shows in `tandem status`; `init --replace` takes over from it.
+- **Ending.** `tandem done` writes the summary and clears the repo pointer. A stale pointer (one naming
+  an ended or missing session) shows in `tandem status`; a plain `tandem init` takes over from it.
+  After `done` the repo resolves to no session, so an ended session's `log`/`status` need `--session`.
+- `summary.md` is mechanical: session facts, task, a one-line-per-message timeline, every console input
+  in full, the bodies of `done` messages, then `decisions.md` verbatim. The narrative is the driver's,
+  in `decisions.md` or its `done` message, written before it calls `tandem done`. `done` takes the
+  session lock that `send` takes, so no message can land after the summary is written.
 - `init` stays explicit in v0; launchers don't auto-init.
 
 ```
@@ -99,6 +104,7 @@ Resolution order, first match wins:
   log.jsonl          # append-only copy of every message; input for the final summary
   plan.md            # driver-owned
   decisions.md       # driver-owned; the summary derives from it
+  summary.md         # written by `tandem done`; agents write decisions.md, not this
   review-N.md        # optional per-checkpoint review artifacts
 ```
 
@@ -231,9 +237,9 @@ All commands resolve the session as described in [Finding the session](#finding-
 | `tandem send [--as R] --to R [--type T] [--reply-to ID]` | body from stdin or arg; tmp, mv to new, append to log |
 | `tandem recv [--as R] [--wait] [--timeout S] [--peek] [--json]` | pop the oldest (lowest-id) `new/` message to `cur/` and print it; `--peek` doesn't consume; `--timeout` implies `--wait`; exit 3 and `no mail for <role>` on stderr when nothing arrives; a wait gives up once the session has ended |
 | `tandem watch [--as R] [--once]` | wait for mail and ring the harness doorbell (`--once`: exit 2 on mail, for Claude's asyncRewake hook) |
-| `tandem log` | dump `log.jsonl` |
-| `tandem status` | active sessions, pending counts per inbox, last message per role, stale pointers |
-| `tandem done` | write the summary and clear the repo's active-session pointer |
+| `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
+| `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
+| `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
 
 ## Waking an agent: the doorbell rule
 

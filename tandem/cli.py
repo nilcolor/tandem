@@ -34,6 +34,24 @@ register(
     maildir.configure_recv,
     maildir.run_recv,
 )
+register(
+    "log",
+    "print the session log (messages, console input, events)",
+    maildir.configure_log,
+    maildir.run_log,
+)
+register(
+    "status",
+    "show active sessions, pending mail, last messages, watchers and stale pointers",
+    maildir.configure_status,
+    maildir.run_status,
+)
+register(
+    "done",
+    "write summary.md, end the session and clear the repo pointer",
+    session.configure_done,
+    session.run_done,
+)
 
 
 class _Parser(argparse.ArgumentParser):

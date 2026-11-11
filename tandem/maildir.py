@@ -310,3 +310,183 @@ def run_recv(args):
         return NO_MAIL
     print(json.dumps(msg, ensure_ascii=False) if args.json else render(msg))
     return 0
+
+
+FOLLOW_INTERVAL = 0.5
+WATCHED_ROLES = ("driver", "navigator")
+
+
+def _indented(first, rest):
+    return "\n".join([first] + [("    " + line).rstrip() for line in rest])
+
+
+def _field(value):
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def render_record(line):
+    """One log.jsonl line as text: a timestamped head line, details indented below it.
+
+    A line that isn't a known record is shown raw rather than dropped, so a
+    damaged log still reads end to end.
+    """
+    try:
+        record = json.loads(line)
+    except ValueError:
+        record = None
+    if not isinstance(record, dict) or record.get("kind") not in ("message", "console", "event"):
+        return "? " + line
+    ts = record.get("ts") or "?"
+    kind = record["kind"]
+    if kind == "message":
+        head, *rest = render(record).split("\n")
+        # render()'s blank line before the body; indentation already sets the body apart.
+        rest.remove("")
+        return _indented("%s  %s" % (ts, head), rest)
+    if kind == "console":
+        head = "%s  %s → %s  console (%s)" % (ts, record.get("from"), record.get("to"), record.get("peer"))
+        return _indented(head, (record.get("body") or "").splitlines())
+    extra = " ".join(
+        "%s=%s" % (k, _field(v)) for k, v in record.items() if k not in ("kind", "ts", "event")
+    )
+    return ("%s  * %s %s" % (ts, record.get("event"), extra)).rstrip()
+
+
+def follow_log(meta, emit, follow=False, interval=None):
+    """Feed every complete log line to `emit`; with `follow`, keep reading by byte offset.
+
+    Following stops once the session has ended and the log is drained:
+    nothing more can be sent, and an endless `-f` on a finished session would
+    only hold the pane.
+    """
+    sdir = session.session_path(meta["dir"])
+    offset = 0
+    while True:
+        lines, offset = session.log_lines(sdir, offset)
+        for line in lines:
+            emit(line)
+        if not follow:
+            return
+        if lines:
+            continue
+        if not session.is_active(session.load_session(meta["dir"])):
+            # `done` writes its event under the lock after marking the session
+            # ended; taking the lock waits for that write to finish.
+            with session.locked(sdir):
+                pass
+            for line in session.log_lines(sdir, offset)[0]:
+                emit(line)
+            return
+        time.sleep(FOLLOW_INTERVAL if interval is None else interval)
+
+
+def configure_log(p):
+    p.add_argument("--json", action="store_true", help="print log.jsonl lines as stored")
+    p.add_argument("-f", "--follow", action="store_true", help="keep printing new lines until the session ends")
+
+
+def run_log(args):
+    meta = session.resolve_args(args)
+
+    def emit(line):
+        print(line if args.json else render_record(line))
+        if args.follow:
+            sys.stdout.flush()
+
+    try:
+        follow_log(meta, emit, follow=args.follow)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def pending_counts(sdir):
+    return {role: len(_inbox_names(sdir, role, "new")) for role in session.ROLES}
+
+
+def last_messages(sdir):
+    """The latest logged message sent by each role."""
+    last = {}
+    for record in session.read_log(sdir):
+        if record.get("kind") == "message" and record.get("from") in session.ROLES:
+            last[record["from"]] = record
+    return last
+
+
+def watcher_state(sdir, role):
+    path = session.watcher_pidfile(sdir, role)
+    if not os.path.lexists(path):
+        return "not running"
+    pid = session.read_pidfile(path)
+    if pid is None:
+        return "unreadable pidfile"
+    if session.pid_alive(pid):
+        return "running (pid %d)" % pid
+    return "dead (stale pid %d)" % pid
+
+
+def describe_session(meta):
+    sdir = session.session_path(meta["dir"])
+    roles = meta.get("roles") or {}
+    head = "%s  %s" % (meta["dir"], meta.get("repo") or "?")
+    if not session.is_active(meta):
+        head += "  (ended %s)" % meta["ended"]
+    facts = ["name %s" % meta.get("name")]
+    if meta.get("ticket"):
+        facts.append("ticket %s" % meta["ticket"])
+    facts.append("created %s" % meta.get("created"))
+    lines = [head, "  " + ", ".join(facts)]
+    lines.append("  roles: " + ", ".join("%s %s" % (r, roles[r]) for r in session.ROLES if r in roles))
+    counts = pending_counts(sdir)
+    lines.append("  pending: " + ", ".join("%s %d" % (r, counts[r]) for r in session.ROLES))
+    last = last_messages(sdir)
+    for role in session.ROLES:
+        msg = last.get(role)
+        if msg is None:
+            lines.append("  last from %s: none" % role)
+        else:
+            lines.append(
+                "  last from %s: #%s %s → %s  %s" % (role, msg.get("id"), msg.get("type"), msg.get("to"), msg.get("ts"))
+            )
+    lines.append(
+        "  watchers: " + ", ".join("%s %s" % (r, watcher_state(sdir, r)) for r in WATCHED_ROLES)
+    )
+    return "\n".join(lines)
+
+
+def stale_pointers():
+    """(repo path, session dir, reason) for pointers naming an ended or missing session."""
+    stale = []
+    for repo, dir_name in session.repo_pointers():
+        try:
+            meta = session.load_session(dir_name) if "/" not in dir_name else None
+        except TandemError:
+            stale.append((repo, dir_name, "unreadable"))
+            continue
+        if meta is None:
+            stale.append((repo, dir_name, "missing"))
+        elif not session.is_active(meta):
+            stale.append((repo, dir_name, "ended"))
+    return stale
+
+
+def configure_status(p):
+    pass
+
+
+def run_status(args):
+    # Global by default: status is how the user finds sessions, so it must not
+    # depend on which repo the pane is in. --session narrows it to one.
+    if getattr(args, "session", None):
+        sessions = [session.resolve_args(args)]
+        stale = []
+    else:
+        sessions = session.active_sessions()
+        stale = stale_pointers()
+    blocks = [describe_session(m) for m in sessions] or ["no active sessions"]
+    if stale:
+        lines = ["stale repo pointers (`tandem init` in the repo starts a new session):"]
+        lines += ["  %s → %s (%s)" % (repo or "?", dir_name, reason) for repo, dir_name, reason in stale]
+        blocks.append("\n".join(lines))
+    print("\n\n".join(blocks))
+    return 0

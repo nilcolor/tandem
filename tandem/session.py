@@ -146,6 +146,45 @@ def write_pointer(top, dir_name):
     write_text_atomic(os.path.join(pdir, "current"), dir_name + "\n")
 
 
+def clear_pointer(top, dir_name):
+    """Remove the repo's pointer if it still names `dir_name`; a pointer that moved on is left alone."""
+    if read_pointer(top) != dir_name:
+        return
+    pdir = repo_pointer_dir(top)
+    for name in ("current", "path"):
+        try:
+            os.remove(os.path.join(pdir, name))
+        except FileNotFoundError:
+            pass
+    try:
+        os.rmdir(pdir)
+    except OSError:
+        pass
+
+
+def _read_stripped(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def repo_pointers():
+    """(repo path or None, session dir name) for every repo pointer, by pointer key."""
+    try:
+        keys = sorted(os.listdir(paths.repos_dir()))
+    except FileNotFoundError:
+        return []
+    found = []
+    for key in keys:
+        pdir = os.path.join(paths.repos_dir(), key)
+        current = _read_stripped(os.path.join(pdir, "current"))
+        if current:
+            found.append((_read_stripped(os.path.join(pdir, "path")), current))
+    return found
+
+
 @contextlib.contextmanager
 def locked(sdir):
     """Exclusive flock on `<session>/lock`: serializes id allocation and log appends."""
@@ -169,6 +208,71 @@ def log_event(sdir, event, **fields):
     record.update(fields)
     with locked(sdir):
         write_log_line(sdir, record)
+
+
+def log_lines(sdir, offset=0):
+    """Complete log.jsonl lines from byte `offset`, and the offset after the last one.
+
+    A line without its newline yet is a write in progress; it is left for the
+    next call instead of being read half-written.
+    """
+    try:
+        with open(os.path.join(sdir, "log.jsonl"), "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except FileNotFoundError:
+        return [], offset
+    end = data.rfind(b"\n")
+    if end < 0:
+        return [], offset
+    # Split on b"\n" only: str.splitlines would also break at U+2028 and
+    # friends, which json.dumps(ensure_ascii=False) leaves unescaped.
+    lines = [raw.decode("utf-8", "replace") for raw in data[:end].split(b"\n")]
+    return lines, offset + end + 1
+
+
+def read_log(sdir):
+    """Parsed log.jsonl records, oldest first; lines that aren't JSON objects are skipped."""
+    records = []
+    for line in log_lines(sdir)[0]:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def watcher_pidfile(sdir, role):
+    return os.path.join(sdir, "peers", role, "watch.pid")
+
+
+def read_pidfile(path):
+    """The pid a watcher pidfile names, or None when it is missing or unreadable.
+
+    Claude's waiter writes a bare pid, agy's loop `{"pid": …, "ls_address": …}`.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.loads(f.read())
+    except (OSError, ValueError):
+        return None
+    if isinstance(value, dict):
+        value = value.get("pid")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _allocate_dir(base):
@@ -413,3 +517,115 @@ def resolve_session(explicit=None, cwd=None):
 def resolve_args(args):
     """`resolve_session` for a parsed command line (uses the global `--session`)."""
     return resolve_session(getattr(args, "session", None))
+
+
+SUBJECT_CAP = 100
+
+
+def _subject(body):
+    """First non-blank line of a message body, capped for a one-line timeline entry."""
+    for line in (body or "").splitlines():
+        line = line.strip()
+        if line:
+            return line if len(line) <= SUBJECT_CAP else line[: SUBJECT_CAP - 1].rstrip() + "…"
+    return ""
+
+
+def _quoted(text, indent="  "):
+    return "\n".join((indent + "> " + line).rstrip() for line in (text or "").rstrip().splitlines())
+
+
+def _read_decisions(sdir):
+    try:
+        with open(os.path.join(sdir, "decisions.md"), encoding="utf-8") as f:
+            text = f.read().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        return "_decisions.md could not be read: %s_" % exc
+    return text or None
+
+
+def build_summary(sdir, meta):
+    """summary.md for an ending session: header facts, task, timeline, console input, decisions.
+
+    Mechanical on purpose: the narrative is the driver's, written to
+    decisions.md or a `done` message before it calls `tandem done`.
+    """
+    records = read_log(sdir)
+    messages = [r for r in records if r.get("kind") == "message"]
+    consoles = [r for r in records if r.get("kind") == "console"]
+    wrap_up = [m for m in messages if m.get("type") == "done"]
+    roles = meta.get("roles") or {}
+
+    facts = [
+        "- session: `%s`" % meta.get("dir"),
+        "- repo: `%s`" % meta.get("repo"),
+        "- ticket: %s" % (meta.get("ticket") or "none"),
+        "- roles: %s" % (", ".join("%s %s" % (r, roles[r]) for r in ROLES if r in roles) or "none"),
+        "- started: %s" % meta.get("created"),
+        "- ended: %s" % meta.get("ended"),
+    ]
+    blocks = ["# %s" % meta.get("name"), "\n".join(facts)]
+
+    blocks += ["## Task", (meta.get("task") or "").strip() or "_No task brief was recorded._"]
+
+    timeline = []
+    for m in messages:
+        notes = [m.get("type") or "?"]
+        if m.get("reply_to"):
+            notes.append("reply to #%s" % m["reply_to"])
+        line = "- `#%s` %s %s → %s, %s" % (m.get("id"), m.get("ts"), m.get("from"), m.get("to"), ", ".join(notes))
+        subject = _subject(m.get("body"))
+        timeline.append(line + (": " + subject if subject else ""))
+    blocks += ["## Messages (%d)" % len(messages), "\n".join(timeline) or "_No messages._"]
+
+    blocks.append("## Human input in consoles (%d)" % len(consoles))
+    for c in consoles:
+        blocks.append("- %s, to %s (%s console):" % (c.get("ts"), c.get("to"), c.get("peer")))
+        blocks.append(_quoted(c.get("body")))
+    if not consoles:
+        blocks.append("_None._")
+
+    if wrap_up:
+        blocks.append("## Wrap-up")
+        for m in wrap_up:
+            blocks += ["From %s (`#%s`):" % (m.get("from"), m.get("id")), _quoted(m.get("body"), indent="")]
+
+    blocks += ["## Decisions", _read_decisions(sdir) or "_decisions.md was not written._"]
+    return "\n\n".join(b for b in blocks if b) + "\n"
+
+
+def end_session(meta):
+    """Write summary.md, mark the session ended, log `done`, clear the repo pointer.
+
+    Everything but the pointer happens under the session lock, the same one
+    `deliver` takes, so no message can land after the summary is written.
+    """
+    sdir = session_path(meta["dir"])
+    with locked(sdir):
+        current = load_session(meta["dir"])
+        if current is None:
+            raise TandemError("session %s no longer exists" % meta["dir"])
+        if not is_active(current):
+            raise TandemError("session %s already ended at %s" % (meta["dir"], current["ended"]))
+        current["ended"] = iso(_now())
+        summary = os.path.join(sdir, "summary.md")
+        write_text_atomic(summary, build_summary(sdir, current))
+        save_session(current)
+        write_log_line(
+            sdir, {"kind": "event", "ts": current["ended"], "event": "done", "session": current["dir"]}
+        )
+    if current.get("repo"):
+        clear_pointer(current["repo"], current["dir"])
+    return current
+
+
+def configure_done(p):
+    pass
+
+
+def run_done(args):
+    meta = end_session(resolve_args(args))
+    print(os.path.join(session_path(meta["dir"]), "summary.md"))
+    return 0
