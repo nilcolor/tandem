@@ -119,8 +119,9 @@ The user takes part two ways, and both are first-class:
   bypasses the bus, so each launcher installs a hook that appends every prompt the user types to
   `log.jsonl` as `from: human`: `UserPromptSubmit` for Claude, `PreInvocation`'s `lastUserInput` for
   agy. Decisions made in a console then still reach the summary.
-- **`tandem human`** from any terminal: reads the `human` inbox (escalations, questions) and sends to
-  either role.
+- **`tandem human`** from any terminal, even outside the repo (resolution step 4): reads the `human`
+  inbox (escalations, questions) and sends to either role. A message without a type answers the last
+  message the user read from that role, so a reply to an escalation threads without typing an id.
 
 No separate notifier. An agent that escalates also says so in its own console, so the user sees it
 where they are already looking; the skill requires it.
@@ -279,6 +280,7 @@ All commands resolve the session as described in [Finding the session](#finding-
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
+| `tandem human` | REPL for the user, sending as `human`; refuses an ended session. Every 1 s it pops new `human` mail to `cur/` and prints it, then reads input lines (one line is one message). `@driver <text>` / `@navigator <text>` answer (`reply_to`) the latest message from that role the user has read (`inbox/human/cur/`), else send a `decision`; `@role:<type> <text>` sets the type (only `answer` threads); bare text goes to the driver; a mistyped `@role`, type or `/command` is refused, never sent. `/log` and `/status` print this session's `tandem log` / `tandem status` output, `/help`, `/quit`. Ctrl-D, Ctrl-C and `/quit` exit 0; when the session ends (`tandem done` elsewhere) it prints any last mail, says so and exits 0 |
 | `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
 
 ## Waking an agent: the doorbell rule
