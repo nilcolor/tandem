@@ -13,7 +13,6 @@ Hook = namedtuple("Hook", "name peer event run safe")
 
 ERROR_CAP = 500
 ASK = {"decision": "ask"}
-BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
 NOOP = {}
 REWAKE_PREFIX = "<task-notification>"
 # A watcher that fails to start would otherwise make every idle Stop re-enter
@@ -137,20 +136,6 @@ def record_conversation(sdir, payload):
     session.write_text_atomic(path, conv + "\n")
 
 
-def sandboxed(sdir):
-    """Whether the agy profile last launched runs commands in the sandbox (the navigator profile).
-
-    Only that profile has `unsandboxed(...)` rules; forcing a bypass under the others would
-    prompt for it, while their `command(...)` rules approve the plain call.
-    """
-    try:
-        with open(_agy_file(sdir, "profile.json"), encoding="utf-8") as f:
-            profile = json.load(f)
-    except (OSError, ValueError):
-        return False
-    return isinstance(profile, dict) and profile.get("enableTerminalSandbox") is True
-
-
 def _session_command(command):
     """`tandem <sub>` when `command` runs a tandem subcommand outside AGENT_COMMANDS, else None.
 
@@ -168,7 +153,7 @@ def _session_command(command):
 
 
 def agy_pretool(meta, payload):
-    """PreToolUse for run_command: force the bypass, gate a navigator's writes, or pass through.
+    """PreToolUse for run_command: gate a navigator's writes, else pass through to agy's rules.
 
     Never returns `{}`, which agy reads as deny.
     """
@@ -181,12 +166,8 @@ def agy_pretool(meta, payload):
     command = args.get("CommandLine") if isinstance(args, dict) else None
     if not isinstance(command, str):
         raise HookInputError("run_command without a CommandLine string")
-    sdir = session.session_path(meta["dir"])
-    role = session.role_of(meta, "agy")
-    if cmdline.bypass_prefix(command, protocol.approved_prefixes(meta, role)) is not None:
-        return BYPASS if sandboxed(sdir) else ASK
     # Writing is the driver's job; any other role (or none) is gated.
-    if role != "driver":
+    if session.role_of(meta, "agy") != "driver":
         reason = cmdline.write_reason(command) or _session_command(command)
         if reason is not None:
             return {

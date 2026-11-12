@@ -20,7 +20,7 @@ tandem/session.py          naming, init, resolution, session.json and its state,
 tandem/maildir.py          envelopes, id allocation, deliver (send), pop/peek (recv), rendering, log -f,
                            status
 tandem/watch.py            doorbell text, rung markers; watch --once (Claude) and --detach (agy)
-tandem/cmdline.py          sh-style lexer, bypass prefix match and the navigator write gate
+tandem/cmdline.py          sh-style lexer and the navigator write gate
 tandem/hooks.py            `tandem hook <event>`: Claude's prompt log and the four agy hooks
 tandem/protocol.py         renders templates/protocol.md for a peer and role (code-owned values such as
                            message types come in through placeholders); the launchers' initial prompt
@@ -28,7 +28,7 @@ tandem/protocol.py         renders templates/protocol.md for a peer and role (co
                            unprompted (one list for every rule)
 tandem/templates/protocol.md  the protocol both peers get (shared, role and peer sections)
 tandem/launch_claude.py    `tandem claude`: settings.json, protocol, argv/env, exec
-tandem/launch_agy.py       `tandem agy`: hooks.json, rules, profiles, user deny carry-over, self-check
+tandem/launch_agy.py       `tandem agy`: agy version gate, hooks.json, rules, profiles, user deny carry-over
 tandem/human.py            `tandem human` REPL
 tests/                     unittest suite, one file per area; tests/helpers.py holds the fixture
 docs/design.md             the decision record
@@ -76,7 +76,7 @@ harness. Nothing goes into the target repo or the user's global config.
   that arrive as hook text. `--add-dir <session dir>` lets it read and, as driver, write the shared
   files.
 - **agy** (`tandem agy`): `peers/agy/profile.json` passed with `--settings` is the whole permission
-  policy (navigator, fallback or driver profile, deny merged with the user's global deny).
+  policy (navigator or driver profile, deny merged with the user's global deny).
   `--add-dir <session dir>` makes agy load `.agents/hooks.json` and `.agents/rules/AGENTS.md` from
   it. `hooks.json` has a single top-level hook name, `tandem`, holding the events; event names at
   the top level load nothing. Its events come from `hooks.HOOKS` (each agy hook's `event`), so a hook
@@ -93,13 +93,10 @@ Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status
 - `peers/<role>/watch.log`: the agy watcher's own log (start, rings, failed `send-message` calls,
   exit reason); `peers/<role>/watch.pid` (`{pid, ls_address}`) and `peers/<role>/rung` (highest
   id rung) are its state, for Claude's waiter too.
-- `peers/agy/profile.json` is the profile the last `tandem agy` launched with; the pretool hook
-  reads its `enableTerminalSandbox` to decide whether to force a bypass.
-- `log.jsonl` (`tandem log`) holds the `agy_profile` event with the self-check's verdict.
-- `$TANDEM_HOME/agy-check.json` caches the agy self-check per `agy --version`; delete it to force a
-  re-run. Add a version to `VERIFIED_AGY_VERSIONS` only after re-running the live probe on it and
-  recording it as a new file in `docs/probes/`. From `UNSANDBOXED_REMOVED_IN` (1.5.6) on, the
-  navigator gets the fallback profile and no check runs (and nothing is cached).
+- `peers/agy/profile.json` is the profile the last `tandem agy` launched with.
+- `log.jsonl` (`tandem log`) holds the `agy_profile` event with agy's role and version.
+- `MIN_AGY_VERSION` in `tandem/launch_agy.py` is the oldest agy tandem launches. Raise it only
+  after a live check on the newer version, recorded as a new file in `docs/probes/`.
 
 ## Rules
 

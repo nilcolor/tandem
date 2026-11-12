@@ -37,7 +37,7 @@ COMMANDS = (
     ),
     Command(
         "agy",
-        "launch agy as this session's navigator or driver (checks the sandbox profile, execs agy)",
+        "launch agy as this session's navigator or driver (needs agy 1.5.6+, execs agy)",
         launch_agy.configure_agy,
         launch_agy.run_agy,
     ),

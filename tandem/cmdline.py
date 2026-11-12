@@ -1,8 +1,7 @@
-"""Shell command-line analysis for agy's PreToolUse hook: the bypass test and the write gate.
+"""Shell command-line analysis for agy's PreToolUse hook: the navigator's write gate.
 
-Both read the command the way `sh` would (quotes, escapes, separators), so a
-quoted message body stays one literal argument. The bypass test fails closed
-on anything it can't read; the write gate is best effort.
+The command is read the way `sh` would (quotes, escapes, separators), so a quoted message body
+stays one literal argument and the words in it never trip the gate. The gate is best effort.
 """
 
 import os
@@ -238,29 +237,6 @@ def tokens(text):
         raise Unreadable("unterminated double quote")
     flush()
     return out, expands
-
-
-def bypass_prefix(text, prefixes):
-    """The prefix `text` runs under, if it is one plain command starting with it; else None.
-
-    Plain means no separator, redirect or expansion outside quotes: one
-    command whose words are all literal, so nothing but that command can run
-    outside the sandbox. The prefix is matched on the command text, the way
-    agy matches its rule prefixes, so the hook never forces a bypass that no
-    `unsandboxed(...)` rule approves; it must end at a space, so `tandem sendx`
-    isn't `tandem send`.
-    """
-    text = text.strip()
-    try:
-        toks, expands = tokens(text)
-    except Unreadable:
-        return None
-    if not toks or expands or any(kind != WORD for kind, _ in toks):
-        return None
-    for prefix in prefixes:
-        if prefix and re.match(re.escape(prefix) + r"(?:[ \t]|\Z)", text):
-            return prefix
-    return None
 
 
 def segments(toks):

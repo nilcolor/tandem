@@ -24,9 +24,8 @@ same change.
   reviewer that spots a bug will "just fix it" despite instructions. Claude as navigator: deny rules
   for Edit, Write and NotebookEdit (its Bash isn't gated yet, see
   `docs/backlog/claude-navigator-bash-can-write.md`). agy as navigator: a `write_file(*)` deny plus
-  the tandem `PreToolUse` write gate on shell commands, because agy's sandbox stopped making the
-  workspace read-only in 1.5.5 and the navigator runs without a sandbox from 1.5.6
-  ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
+  the tandem `PreToolUse` write gate on shell commands, since the navigator runs without agy's
+  sandbox ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
 - The navigator reviews evidence (diffs, commits, test runs it ran itself), not chat claims.
 
 ## Transport: maildir per session, no daemon
@@ -195,7 +194,7 @@ panes: the user runs each launcher in whatever terminal they like.
   `Stop`, each calling `'<shim>' --session <dir> hook agy-…` (event names at the top level load
   nothing, [1.5.5 re-check](probes/2026-11-11-agy-1.5.5-recheck.md)); `.agents/rules/AGENTS.md`, the
   rendered protocol for agy's role (refused if over agy's 24 KB rules cap); and
-  `peers/agy/profile.json`, one of three profiles ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
+  `peers/agy/profile.json`, the navigator or driver profile ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
   Nothing is installed globally and nothing is written into the target repo.
 - The test prefixes come from `session.json` `test_cmds` (detected at `init` or given with
   `--test-cmd`; whitespace collapsed and duplicates dropped). One containing `(` or `)` is left out
@@ -204,29 +203,21 @@ panes: the user runs each launcher in whatever terminal they like.
   the global one, so tandem writes its own deny rules followed by the user's global agy deny
   (`~/.gemini/antigravity-cli/settings.json` `permissions.deny`, read and never written,
   deduplicated). The user's global `allow` is not carried over: the profile is the whole allowlist.
-- **Navigator profile choice (`--profile auto`).** `agy --version` first.
-  - From 1.5.6 (`UNSANDBOXED_REMOVED_IN`): the fallback profile with a one-line note, no self-check.
-    1.5.6 removed `unsandboxed(...)` rules and asks before every bypass, and `/config` still echoes
-    the rules, so no check could tell ([2026-11-12 live check](probes/2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md)).
-  - Before 1.5.6: `agy --settings <navigator profile in a temp dir> -p=/config --output-format json`
-    (30 s, no model turn). It passes when the config shows the profile's `toolPermission`,
-    `enableTerminalSandbox` and every rule, and agy says nothing about `unsandboxed` being
-    unsupported. That proves only that the profile parses, so the version carries the rest: on a
-    version in `VERIFIED_AGY_VERSIONS` (1.5.4, 1.5.5) the navigator profile is used silently; on any
-    other version that parses it is used with a one-line warning pointing at `--profile fallback`. A
-    failed check switches to fallback with a warning. A definitive result is cached in
-    `$TANDEM_HOME/agy-check.json` per `agy --version`; a timeout, a non-zero exit or output that isn't
-    a config is re-checked next launch.
-  - An `agy --version` that isn't a plain `x.y.z` keeps the self-check path.
-  - The launch logs an `agy_profile` event with the profile and the check's verdict. `--profile
-    fallback` skips the check; a driver never runs it.
+- **agy 1.5.6 or later only.** `tandem agy` runs `agy --version` before claiming a role. A
+  parseable version below 1.5.6 (`MIN_AGY_VERSION`) is refused with a pointer to `agy update`, and
+  nothing is written; a version string tandem can't read only warns, so a format change in a later
+  agy doesn't lock users out. 1.5.6 is the first version the profiles, hooks and watcher were
+  checked live on; 1.5.4 and 1.5.5 sandboxed commands by default and needed `unsandboxed(...)`
+  bypass rules, which 1.5.6 removed ([2026-11-12 live check](probes/2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md)).
+  Supporting both would mean a second navigator profile, a forced-bypass branch in the hook and a
+  startup self-check that couldn't tell the versions apart anyway (`/config` echoes rules it
+  ignores). The launch logs an `agy_profile` event with the role and the version.
 - **agy's commands run in the session dir.** Each `run_command` gets a new shell in agy's first
   workspace root, which is the `--add-dir` session dir whatever order the dirs are given in, and
   agy ignores a hook-set `Cwd` ([2026-11-12 live check](probes/2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md)).
   So the protocol has agy run repo commands as `cd <repo> && <command>`, which agy's rules approve
   part by part (`cd` is on agy's own system allowlist) and the write gate still checks; tandem
-  commands stay plain, since they work from any directory. Under the sandboxed 1.5.4–1.5.5 profile
-  such a compound command gets no bypass.
+  commands stay plain, since they work from any directory.
 - New peers (Copilot, Codex) are added as new launchers plus a peer section in the protocol
   template; the bus, the CLI and the shared rules don't change.
 
@@ -322,54 +313,44 @@ user's own config stays untouched.
 
 ### agy profiles
 
-- **Fallback profile**: the navigator's default from agy 1.5.6, `--profile fallback`, or automatic
-  when the self-check fails. No sandbox, `request-review`, a tight allowlist: read-only git
-  (`git status|diff|log|show` and the same as `git -C <repo> …`), the protocol's tandem subcommands
-  (`command(tandem send)` and so on), the exact test commands (`command(dip rspec)`, never
-  `command(dip)`); `write_file(*)` denied, and the hook gating shell writes. Anything else prompts.
-- **Sandboxed navigator profile (agy 1.5.4–1.5.5)**: `proceed-in-sandbox`, sandbox on,
-  `unsandboxed(<prefix>)` for the protocol's tandem subcommands and the test commands,
-  `write_file(*)` denied. Commands run in the sandbox with no prompts; tests and tandem commands run
-  on the host through a hook-forced bypass ([1.5.4 sandbox](probes/2026-11-10-agy-1.5.4-permissions-and-sandbox.md),
-  [1.5.5 live probe](probes/2026-11-11-agy-1.5.5-live-probe.md)). It can't work from 1.5.6.
-- **Driver profile (when agy drives)**: `--mode accept-edits` (auto would need the sandbox and
-  silently fell back to default), `request-review`, allow the driver's tandem subcommands (the
-  navigator's plus `tandem done`), the test commands, `command(git)`, and
-  `write_file(<session dir>/plan.md)` and `write_file(<session dir>/decisions.md)` (outside the
-  workspace, so `accept-edits` alone asks); `deny` = the user's global deny; no sandbox (the driver
-  needs network and the full toolchain). Prompts are left for commands off the allowlist.
-- A test prefix takes any arguments, and some of them write on the host or run other programs
-  (`go test -exec 'sh -c …'`, `-o <path>`), so the navigator's read-only rule holds for its test runs
-  only as far as the driver's `git status` check
-  (`docs/backlog/test-prefix-bypass-takes-any-arguments.md`).
+Both keep agy's sandbox off and terminal commands under `request-review`, whatever the user's global
+settings say, so the allowlist decides what runs unasked.
+
+- **Navigator**: a tight allowlist: the protocol's tandem subcommands (`command(tandem send)` and so
+  on), the exact test commands (`command(dip rspec)`, never `command(dip)`), and read-only git
+  (`git status|diff|log|show`, and the same as `git -C <repo> …`, which agy reaches for on its own);
+  `write_file(*)` denied, and the hook gating shell writes. Anything else prompts.
+- **Driver**: `--mode accept-edits` (`auto` would need the sandbox and silently fell back to the
+  default mode), the driver's tandem subcommands (the navigator's plus `tandem done`), the test
+  commands, `command(git)`, and `write_file(<session dir>/plan.md)` and
+  `write_file(<session dir>/decisions.md)` (outside the workspace, so `accept-edits` alone asks);
+  `deny` = the user's global deny. Prompts are left for commands off the allowlist.
+- An allowed test prefix takes any arguments, and some of them write on the host or run other
+  programs (`go test -exec 'sh -c …'`, `-o <path>`), so the navigator's read-only rule holds for its
+  test runs only as far as the driver's `git status` check
+  (`docs/backlog/allowlisted-test-prefix-takes-any-arguments.md`).
 - **Safety net for any profile**: the driver runs `git status` at each checkpoint and treats any
   change it didn't make as a navigator violation. Tests legitimately write gitignored paths
   (`coverage/`, `log/`, `tmp/`), which `git status` already ignores.
 
 ### The `PreToolUse` hook
 
-`agy-pretool` decides each `run_command` call, in this order:
+`agy-pretool` decides each `run_command` call:
 
-1. A test prefix or one of the role's tandem subcommands (`tandem send`, `recv`, `status`, `log`,
-   `watch`, and `done` for a driver) as one plain command (no `;`, `&`, `|`, redirect, `$` or
-   backtick outside quotes; quoted text is literal), matched on the command text the way agy matches
-   rule prefixes → `{"decision":"allow","overwrite":{"BypassSandbox":true}}` under the sandboxed
-   navigator profile (the hook reads `enableTerminalSandbox` from `peers/agy/profile.json`; both
-   the forced bypass and an `unsandboxed` rule are needed), `{"decision":"ask"}` under the others,
-   whose `command(...)` rules approve it.
-2. **Write gate**, while agy isn't the driver: a command that looks like a write (redirects
-   `>`/`>>`, `tee`, `touch`, `rm`, `mv`, `cp`, `mkdir`, `ln`, `chmod`, `sed -i`, `perl -i`,
-   `truncate`, `dd`, `git` subcommands that change the tree or refs such as `commit`, `checkout`,
-   `reset`, `restore`, `stash`, `apply`, `merge`, `rebase`, `clean`, `add`, `push`, `config`,
-   `remote`), or a tandem subcommand outside the role's list (`claude`, `agy`, `init`, `done`,
-   `human`, `hook`) → `force_ask` with the reason `tandem write gate: …`. The command is read the
-   way `sh` reads it and every part is checked, including `$(…)`, backticks, subshells and each side
-   of `;`/`&&`/`||`/`|`; `2>&1` and redirects to `/dev/null` aren't writes, read-only forms
-   (`git stash list`, `git config --get`, `git remote -v`) aren't gated, and wrappers are skipped
-   with their option values (`sudo -u bob rm x` is `rm`). It's best effort: writes through
-   `python3 -c` or a script can't all be spotted (`docs/backlog/agy-write-gate-misses-indirect-writes.md`),
-   so `git status` stays the net. Rules live in `tandem/cmdline.py`.
-3. Anything else → `{"decision":"ask"}`, the pass-through. `{}` would deny.
+- **Write gate**, while agy isn't the driver: a command that looks like a write (redirects
+  `>`/`>>`, `tee`, `touch`, `rm`, `mv`, `cp`, `mkdir`, `ln`, `chmod`, `sed -i`, `perl -i`,
+  `truncate`, `dd`, `git` subcommands that change the tree or refs such as `commit`, `checkout`,
+  `reset`, `restore`, `stash`, `apply`, `merge`, `rebase`, `clean`, `add`, `push`, `config`,
+  `remote`), or a tandem subcommand outside the protocol's list (`claude`, `agy`, `init`, `done`,
+  `human`, `hook`) → `force_ask` with the reason `tandem write gate: …`. The command is read the
+  way `sh` reads it, so a quoted message body is one literal argument and the words in it don't
+  trip the gate, and every part is checked, including `$(…)`, backticks, subshells and each side of
+  `;`/`&&`/`||`/`|`. `2>&1` and redirects to `/dev/null` aren't writes, read-only forms
+  (`git stash list`, `git config --get`, `git remote -v`) aren't gated, and wrappers are skipped
+  with their option values (`sudo -u bob rm x` is `rm`). It's best effort: writes through
+  `python3 -c` or a script can't all be spotted (`docs/backlog/agy-write-gate-misses-indirect-writes.md`),
+  so `git status` stays the net. Rules live in `tandem/cmdline.py`.
+- Anything else → `{"decision":"ask"}`, the pass-through to agy's own rules. `{}` would deny.
 
 ### Claude
 
@@ -400,8 +381,8 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
 - A blocking wait is `tandem recv --timeout 100`: Claude's Bash tool kills a command at 120 s by
   default, which would cut the wait off before `recv` could exit 3 and trigger the escalation.
 - Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: both
-  harnesses' permission rules match the command text, and the sandboxed agy profile only bypasses
-  plain commands.
+  harnesses' permission rules match the command text, and every part of a compound command needs
+  its own rule.
 - agy runs repo commands as `cd <repo> && <command>`, otherwise in plain form (no `git -C`, no
   absolute paths), and reads files with its file tools: each off-allowlist form is a prompt.
 - The driver ends a session only after the user confirms, and puts its narrative in `decisions.md`
@@ -419,7 +400,7 @@ Hooks call the shim by absolute path, so they don't depend on the harness's PATH
   `tandem:` (the launcher's start line), an asyncRewake wake (a `<task-notification>` carrying the
   doorbell) and ended sessions.
 - The agy hooks all write `conversationId` to `peers/agy/conversation_id` first.
-- `agy-pretool`: [the decision above](#the-pretooluse-hook), never `{}`.
+- `agy-pretool`: [the write gate above](#the-pretooluse-hook), never `{}`.
 - `agy-session-start` injects a system message naming agy's role and session, the exact watcher
   command when no live watcher holds the pidfile, and the pending count.
 - `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the
@@ -480,4 +461,3 @@ None blocking. Live-only or out of scope:
 - Whether agy hooks see `ANTIGRAVITY_LS_ADDRESS` (on 1.5.4 they got only the conversation id), so a
   hook judges a watcher by its pid alone until the watcher's own LS check ends it.
 - Whether agy's `plan` mode blocks running tests and shell writes.
-- agy's sandbox on Linux is unverified (`docs/backlog/agy-sandbox-unverified-on-linux.md`).

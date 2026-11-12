@@ -36,7 +36,7 @@ def doorbell(role):
 
 
 def detach_command(role):
-    """What agy runs to start its watcher: one plain command, so the bypass rule matches it."""
+    """What agy runs to start its watcher: one plain command, so `command(tandem watch)` matches it."""
     return "tandem watch --as %s --detach" % role
 
 

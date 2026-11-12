@@ -4,7 +4,6 @@ from tandem import cmdline
 from tandem.cmdline import REDIR, SEP, WORD
 from tests.helpers import TandemTestCase
 
-PREFIXES = ["go test", "dip rspec", "bundle exec rspec", "tandem send", "tandem recv", "tandem status"]
 
 
 def words(text):
@@ -75,87 +74,6 @@ class TokensTest(TandemTestCase):
         for text in ("echo 'abc", 'echo "abc', 'echo "$(ls)'):
             with self.assertRaises(cmdline.Unreadable):
                 cmdline.tokens(text)
-
-
-class BypassTest(TandemTestCase):
-    def check(self, text, prefixes=PREFIXES):
-        return cmdline.bypass_prefix(text, prefixes)
-
-    def test_each_prefix(self):
-        self.assertEqual(self.check("go test ./..."), "go test")
-        self.assertEqual(self.check("dip rspec spec/models"), "dip rspec")
-        self.assertEqual(self.check("bundle exec rspec"), "bundle exec rspec")
-        self.assertEqual(self.check("tandem recv"), "tandem recv")
-        self.assertEqual(self.check("tandem status"), "tandem status")
-
-    def test_surrounding_whitespace_and_trailing_newline(self):
-        self.assertEqual(self.check("  go test\t-run X ./...\n"), "go test")
-
-    def test_only_listed_subcommands(self):
-        for text in ("tandem", "tandem done", "tandem init --replace", "tandem claude -- -p x", "tandem agy"):
-            self.assertIsNone(self.check(text), text)
-
-    def test_word_boundary(self):
-        for text in ("tandemx status", "tandem sendx", "go testing", "gotest", "dip rspecs", "dip", "go", "bundle exec"):
-            self.assertIsNone(self.check(text), text)
-
-    def test_prefix_must_lead(self):
-        for text in ("echo tandem", "TANDEM_ROLE=driver tandem send x", "env tandem status", "/usr/bin/tandem status"):
-            self.assertIsNone(self.check(text), text)
-
-    def test_matched_on_the_text_like_agy_rules(self):
-        # agy's rule prefixes compare command text, so a spelling they wouldn't match must not be
-        # forced into a bypass the rule then doesn't approve (a prompt).
-        for text in ("'tandem' status", "go  test ./...", "tandem\tsend x"):
-            self.assertIsNone(self.check(text), text)
-        self.assertEqual(self.check("go test -tags 'integration' ./...", ["go test -tags 'integration'"]), "go test -tags 'integration'")
-
-    def test_single_quoted_multi_line_body(self):
-        text = "tandem send --to driver --type review 'CHANGES\n- a; b && c | d > e $(f) `g`\n- (h)'"
-        self.assertEqual(self.check(text), "tandem send")
-
-    def test_double_quoted_literal_body(self):
-        self.assertEqual(self.check('tandem send "looks good; ship it"'), "tandem send")
-
-    def test_double_quoted_expansion(self):
-        self.assertIsNone(self.check('tandem send "$(cat /etc/passwd)"'))
-        self.assertIsNone(self.check('tandem send "hi $USER"'))
-        self.assertIsNone(self.check('tandem send "`id`"'))
-
-    def test_escaped_metacharacter_is_literal(self):
-        self.assertEqual(self.check("tandem send 'don'\\''t do that'"), "tandem send")
-        self.assertEqual(self.check("tandem send a\\;b"), "tandem send")
-
-    def test_compound_commands(self):
-        for text in (
-            "go test ./... && rm -rf x",
-            "go test ./...; rm -rf x",
-            "go test ./... || true",
-            "tandem status | cat",
-            "tandem status & rm x",
-            "tandem status\nrm x",
-            "cd sub && go test ./...",
-            "(go test ./...)",
-        ):
-            self.assertIsNone(self.check(text), text)
-
-    def test_redirects(self):
-        for text in ("go test ./... > out.txt", "tandem status 2>&1", "tandem send < body.md", "go test >/dev/null"):
-            self.assertIsNone(self.check(text), text)
-
-    def test_substitutions(self):
-        for text in ("tandem send $(cat f)", "tandem send `cat f`", "tandem send $BODY", "go test $(go list ./...)"):
-            self.assertIsNone(self.check(text), text)
-
-    def test_unreadable(self):
-        self.assertIsNone(self.check("tandem send 'unterminated"))
-
-    def test_empty(self):
-        self.assertIsNone(self.check(""))
-        self.assertIsNone(self.check("   "))
-
-    def test_empty_prefix_skipped(self):
-        self.assertEqual(self.check("tandem status", ["", "tandem status"]), "tandem status")
 
 
 class WriteGateTest(TandemTestCase):

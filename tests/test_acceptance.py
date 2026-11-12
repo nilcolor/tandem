@@ -8,9 +8,9 @@ import sys
 import time
 import uuid
 
-from tandem import launch_agy, launch_claude, session, watch
+from tandem import launch_agy, launch_claude, session
 from tests.helpers import SHIM, TandemTestCase
-from tests.test_agy_selfcheck import FAKE_AGY
+from tests.test_run_agy import FAKE_AGY
 from tests.test_watch_agy import FAKE_AGENTAPI, FakeLS
 
 FAKE_CLAUDE = """#!%s
@@ -20,7 +20,7 @@ with open(os.environ["FAKE_CLAUDE_OUT"], "w") as f:
                "session": os.environ.get("TANDEM_SESSION"), "role": os.environ.get("TANDEM_ROLE")}, f)
 """
 
-BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
+ASK = {"decision": "ask"}
 DRIVER_BELL = "tandem doorbell: new mail for driver. Run `tandem recv`."
 NAVIGATOR_BELL = "tandem doorbell: new mail for navigator. Run `tandem recv`."
 # The real detach command plus the hidden test knobs, so the detached watcher reacts in milliseconds.
@@ -181,8 +181,8 @@ class AcceptanceTestCase(TandemTestCase):
         return self.agy_hook("Stop", {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True}, **kw)
 
     def agy_run(self, command, env=None):
-        """agy runs `command` as a run_command tool call; the hook must let it bypass the sandbox."""
-        self.assertEqual(self.pretool(command, env=env), BYPASS, command)
+        """agy runs `command` as a run_command tool call; the hook must pass it to agy's rules."""
+        self.assertEqual(self.pretool(command, env=env), ASK, command)
         return self.ok(command, env or self.agy_env)
 
     def start_agy_watcher(self, env=None):
@@ -258,8 +258,8 @@ class EndToEndTest(AcceptanceTestCase):
         self.assertEqual((agy["session"], agy["role"]), (self.dir, "navigator"))
         with open(launch_agy.profile_path(sdir)) as f:
             profile = json.load(f)
-        self.assertEqual(profile["toolPermission"], "proceed-in-sandbox")
-        self.assertIn("unsandboxed(go test)", profile["permissions"]["allow"])
+        self.assertEqual((profile["toolPermission"], profile["enableTerminalSandbox"]), ("request-review", False))
+        self.assertIn("command(go test)", profile["permissions"]["allow"])
 
         # Launcher first prompts are not human input; what the user types is.
         self.claude_prompt(claude["argv"][-1])
@@ -407,7 +407,7 @@ class EdgeCaseTest(AcceptanceTestCase):
         self.launch_claude()
         self.launch_agy(self.ls)
         slow = DETACH.replace("--ls-check-interval 0.05", "--ls-check-interval 60")
-        self.assertEqual(self.pretool(slow), BYPASS)
+        self.assertEqual(self.pretool(slow), ASK)
         old = int(re.search(r"pid (\d+)", self.ok(slow, self.agy_env)).group(1))
         self.agy_watchers.add(old)
 

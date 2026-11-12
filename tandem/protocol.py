@@ -9,7 +9,7 @@ PEERS = {"claude": "Claude Code", "agy": "agy"}
 # UTF-8 bytes, the unit of agy's cap) to keep the whole protocol under 16 KB.
 TASK_CAP = 6000
 # The tandem subcommands the protocol has agents type, and the only ones pre-approved for them
-# (Claude allow rules, agy bypass and command rules). The rest (`claude`, `agy`, `init`, `human`,
+# (Claude allow rules, agy command rules). The rest (`claude`, `agy`, `init`, `human`,
 # `hook`, and `done` for a navigator) start a harness or end the session, so they get a prompt.
 AGENT_COMMANDS = ("tandem send", "tandem recv", "tandem status", "tandem log", "tandem watch")
 # The driver closes the session once the user has confirmed in its console.
@@ -54,8 +54,8 @@ def _other(role):
 def rule_safe_tests(meta):
     """The session's test commands usable as permission prefixes.
 
-    One with `(` or `)` would end an agy rule early, so it is left out everywhere (agy rules,
-    the hook's bypass, Claude's allow rules) rather than in one place only.
+    One with `(` or `)` would end an agy rule early, so it is left out of Claude's allow rules
+    too, and both harnesses agree on what runs unasked.
     """
     return [c for c in meta["test_cmds"] if "(" not in c and ")" not in c]
 

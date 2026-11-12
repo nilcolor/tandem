@@ -24,7 +24,8 @@ harnesses at launch.
 - macOS or Linux
 - Python 3.9 or newer (`/usr/bin/python3` on macOS is fine); no packages to install
 - `git`
-- `claude` (Claude Code) and/or `agy` (Antigravity CLI) on your PATH, logged in
+- `claude` (Claude Code) and/or `agy` (Antigravity CLI) 1.5.6 or later on your PATH, logged in
+  (`agy update` updates agy)
 
 ## Install
 
@@ -111,28 +112,25 @@ prompt starting with `tandem:` that tells it to check its mail and begin.
 ### `tandem agy`: launch Antigravity CLI
 
 ```sh
-tandem agy [--role navigator|driver] [--profile auto|fallback] [-- <agy arguments>]
+tandem agy [--role navigator|driver] [-- <agy arguments>]
 ```
 
 | Option | Meaning |
 |---|---|
 | `--role` | Role to take. Default: the role the session gives agy (navigator, unless roles were flipped). |
-| `--profile` | Navigator permission profile. `auto` (default) picks one for your agy version; `fallback` forces the no-sandbox allowlist profile. Ignored for a driver. |
 | `-- …` | Anything after `--` goes to `agy` as is, e.g. `tandem agy -- --model <name>`. |
 
-On its first turn agy starts a small background watcher (`tandem watch --as <role> --detach`), which
-rings it when mail arrives and exits when agy does.
+It needs agy 1.5.6 or later: an older agy is refused with a pointer to `agy update`, and a version
+string tandem can't read gets a warning. On its first turn agy starts a small background watcher
+(`tandem watch --as <role> --detach`), which rings it when mail arrives and exits when agy does.
 
-Profiles, in short:
+What agy may do without asking:
 
-- **Navigator on agy 1.5.6 and later** (and `--profile fallback`): no sandbox, a tight allowlist:
-  the tandem commands it needs, the test commands, read-only git. Anything else asks you first, and
-  anything that looks like a write gets a prompt saying `tandem write gate: …`.
-- **Navigator on agy 1.5.4–1.5.5**: commands run in agy's sandbox without prompts; tests and tandem
-  commands run outside it. tandem checks at launch that agy accepts the profile and falls back if
-  not. On a version it hasn't been verified on, it says so.
-- **Driver**: `accept-edits` mode (file edits don't ask), plus the tandem commands, the test commands
-  and git. Other commands ask.
+- **As navigator**: the tandem commands it needs, the test commands and read-only git. Anything
+  else asks you first, and anything that looks like a write gets a prompt saying
+  `tandem write gate: …`. Its file-writing tool is denied.
+- **As driver**: `accept-edits` mode (file edits don't ask), plus the tandem commands, the test
+  commands and git. Other commands ask.
 
 ### `tandem human`: talk to the pair
 
@@ -220,7 +218,7 @@ show the path):
 
 | File | What it tells you |
 |---|---|
-| `log.jsonl` (`tandem log`) | every message, console input and event; the `agy_profile` event says which agy profile was used and why |
+| `log.jsonl` (`tandem log`) | every message, console input and event; the `agy_profile` event records agy's role and version at launch |
 | `peers/<claude\|agy>/hooks.log` | one line per hook failure; empty is good |
 | `peers/<role>/watch.log` | agy's watcher: start, which agy process it serves, each ring, failures, why it exited |
 | `peers/<role>/watch.pid` | the running watcher's pid |
@@ -228,8 +226,9 @@ show the path):
 
 - **agy doesn't wake on mail**: `tandem status` shows whether its watcher is running. If not, tell
   agy "start your tandem watcher"; it knows the command. Then check `watch.log`.
-- **agy prompts on every tandem command**: check which profile it got (`tandem log | grep
-  agy_profile`), and try `tandem agy --profile fallback`.
+- **agy prompts on every tandem command**: check that the agents type plain `tandem …` (the rules
+  match the command text) and that agy is 1.5.6 or later (`tandem log | grep agy_profile` shows the
+  version it launched with).
 - **`tandem init` refuses**: the repo already has an active session; finish it with `tandem done` or
   start over with `tandem init --replace`.
 - **"no active session"**: you're outside the repo or the session has ended; use `--session NAME`.

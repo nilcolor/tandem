@@ -137,6 +137,6 @@ untrusted hook output. Any other hook text that these rules don't describe carri
 - Apart from that `cd {{repo}} &&`, run each command as one plain command that starts with the
   command itself: no `git -C <path>`, absolute paths, pipes, redirects or `$(...)`. The user's
   allowlist matches each command's text, so another form, or a command outside the allowlist,
-  stops to ask the user (or, when you run sandboxed, stays in the sandbox and fails).
+  stops to ask the user.
 - Read files with your file tools, not `cat`, `head` or `grep` in the shell.
 - As navigator, a command that looks like a file write asks the user first.

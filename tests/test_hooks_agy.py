@@ -3,13 +3,12 @@ import os
 import shutil
 from unittest import mock
 
-from tandem import hooks, launch_agy, maildir, protocol, session, watch
+from tandem import hooks, maildir, protocol, session, watch
 from tests.helpers import TandemTestCase
 
 CONV = "ec33ebf9-0cba-4100-8142-c61503f6c587"
 LS = "127.0.0.1:45123"
 ASK = {"decision": "ask"}
-BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
 
 
 def common(event, **extra):
@@ -48,8 +47,6 @@ class AgyHookTestCase(TandemTestCase):
         self.meta = session.init_session(cwd=self.repo, name="add-retry")
         self.dir = self.meta["dir"]
         self.sdir = session.session_path(self.dir)
-        # What `tandem agy` writes for the default navigator; the pretool hook reads it.
-        launch_agy.write_profile(self.meta, "navigator")
         os.chdir(self.repo)
 
     def hook(self, event, stdin, *pre):
@@ -94,18 +91,14 @@ class AgyHookTestCase(TandemTestCase):
             f.write(text)
 
 
-class PretoolBypassTest(AgyHookTestCase):
-    def test_detected_test_prefix(self):
-        self.assertEqual(self.out("agy-pretool", pretool("go test ./...")), BYPASS)
+class PretoolPassThroughTest(AgyHookTestCase):
+    """What isn't a navigator write goes to agy's own rules: `ask`, which the profile's allowlist decides."""
 
-    def test_each_configured_test_prefix(self):
-        self.update(test_cmds=["dip rspec", "bundle exec rspec", "make check"])
-        for cmd in ("dip rspec spec/a_spec.rb", "bundle exec rspec", "make check V=1"):
-            self.assertEqual(self.out("agy-pretool", pretool(cmd)), BYPASS, cmd)
-        self.assertEqual(self.out("agy-pretool", pretool("go test ./...")), ASK)
-
-    def test_tandem_commands(self):
+    def test_protocol_and_test_commands(self):
+        self.update(test_cmds=["go test", "dip rspec"])
         for cmd in (
+            "go test ./...",
+            "dip rspec spec/a_spec.rb",
             "tandem recv",
             "tandem recv --peek",
             "tandem status",
@@ -113,63 +106,25 @@ class PretoolBypassTest(AgyHookTestCase):
             "tandem send --to driver 'ok'",
             "tandem watch --as navigator --detach",
         ):
-            self.assertEqual(self.out("agy-pretool", pretool(cmd)), BYPASS, cmd)
-
-    def test_other_tandem_commands_are_gated(self):
-        # Ungated, these would start a host-side harness (`tandem claude -- --permission-mode
-        # bypassPermissions`), end or replace the session, or read a file from outside the repo.
-        for cmd, sub in (
-            ("tandem claude -- -p 'edit main.go' --permission-mode bypassPermissions", "tandem claude"),
-            ("tandem agy", "tandem agy"),
-            ("tandem init --replace --task-file /etc/hosts", "tandem init"),
-            ("tandem done", "tandem done"),
-            ("tandem --session x done", "tandem done"),
-            ("tandem human", "tandem human"),
-            ("tandem hook agy-stop", "tandem hook"),
-            ("ls; tandem done", "tandem done"),
-        ):
-            out = self.out("agy-pretool", pretool(cmd))
-            self.assertEqual(out["decision"], "force_ask", cmd)
-            self.assertIn("(%s)" % sub, out["reason"])
-        for cmd in ("tandem", "tandem --version"):
             self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
-
-    def test_tandem_without_test_cmds(self):
-        self.update(test_cmds=[])
-        launch_agy.write_profile(session.load_session(self.dir), "navigator")
-        self.assertEqual(self.out("agy-pretool", pretool("tandem recv")), BYPASS)
-        self.assertEqual(self.out("agy-pretool", pretool("go test ./...")), ASK)
 
     def test_multi_line_single_quoted_send(self):
         cmd = (
             "tandem send --to driver --type review --reply-to 3 'CHANGES\n"
             "- retry.go:42: `ctx` is ignored; a cancelled call still sleeps > 1s\n"
-            "- keep $(...) out of the loop && add a test | maybe two'"
+            "- run: rm -rf build > out; git commit && keep $(...) out | maybe two'"
         )
-        self.assertEqual(self.out("agy-pretool", pretool(cmd)), BYPASS)
+        self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK)
 
-    def test_prefix_lookalikes(self):
-        for cmd in ("tandemx status", "go testx", "gotest", "go", "echo tandem status", "./tandem status"):
-            self.assertNotEqual(self.out("agy-pretool", pretool(cmd)), BYPASS, cmd)
-
-    def test_compound_commands(self):
-        for cmd in ("go test ./... && rm -rf x", "tandem status; touch f", "tandem log | head", "cd a && tandem recv"):
-            self.assertNotEqual(self.out("agy-pretool", pretool(cmd)), BYPASS, cmd)
-
-    def test_redirects_and_substitutions(self):
-        for cmd in (
-            "go test ./... > out.txt",
-            "tandem send < body.md",
-            "tandem send $(cat body.md)",
-            "tandem send `cat body.md`",
-            'tandem send "$BODY"',
-            "tandem status 2>&1",
-        ):
-            self.assertNotEqual(self.out("agy-pretool", pretool(cmd)), BYPASS, cmd)
-
-    def test_safe_reads_pass_through(self):
-        for cmd in ("ls -la", "git diff HEAD~1", "cat go.mod", "tandem status | cat"):
+    def test_safe_reads(self):
+        for cmd in ("ls -la", "git diff HEAD~1", "cat go.mod", "tandem status | cat", "go vet ./... 2>&1"):
             self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
+
+    def test_cd_into_the_repo(self):
+        # The protocol's `cd <repo> && <command>` form: agy's rules approve each part.
+        cd = "cd %s && " % self.meta["repo"]
+        for cmd in ("go test ./...", "git diff", "tandem recv"):
+            self.assertEqual(self.out("agy-pretool", pretool(cd + cmd)), ASK, cmd)
 
     def test_never_emits_empty_object(self):
         for stdin in (pretool("ls"), pretool("rm x"), pretool("tandem recv"), "not json", "{}", "[]"):
@@ -179,9 +134,9 @@ class PretoolBypassTest(AgyHookTestCase):
         self.assertEqual(self.out("agy-pretool", pretool("rm -rf x", name="write_file")), ASK)
         self.assertEqual(self.hooks_log(), "")
 
-    def test_bypass_applies_after_session_end(self):
+    def test_after_session_end(self):
         session.end_session(session.load_session(self.dir))
-        self.assertEqual(self.out("agy-pretool", pretool("tandem status")), BYPASS)
+        self.assertEqual(self.out("agy-pretool", pretool("tandem status")), ASK)
 
 
 class PretoolWriteGateTest(AgyHookTestCase):
@@ -204,12 +159,28 @@ class PretoolWriteGateTest(AgyHookTestCase):
         self.assert_gated("ls && mv a b", "mv")
         self.assert_gated("echo $(rm f)", "rm")
 
-    def test_compound_with_bypass_prefix_is_gated(self):
+    def test_writes_behind_approved_commands(self):
         self.assert_gated("go test ./... && rm -rf x", "rm")
         self.assert_gated("tandem status > status.txt", "redirect > status.txt")
+        self.assert_gated("cd %s && touch x" % self.meta["repo"], "touch")
+        self.assert_gated('tandem send --to driver "see $(rm x)"', "rm")
 
-    def test_bypass_wins_over_gate_words_in_quoted_body(self):
-        self.assertEqual(self.gate("tandem send --to driver 'run: rm -rf build > out; git commit'"), BYPASS)
+    def test_other_tandem_commands(self):
+        # Ungated, these would start a host-side harness (`tandem claude -- --permission-mode
+        # bypassPermissions`), end or replace the session, or read a file from outside the repo.
+        for cmd, sub in (
+            ("tandem claude -- -p 'edit main.go' --permission-mode bypassPermissions", "tandem claude"),
+            ("tandem agy", "tandem agy"),
+            ("tandem init --replace --task-file /etc/hosts", "tandem init"),
+            ("tandem done", "tandem done"),
+            ("tandem --session x done", "tandem done"),
+            ("tandem human", "tandem human"),
+            ("tandem hook agy-stop", "tandem hook"),
+            ("ls; tandem done", "tandem done"),
+        ):
+            self.assert_gated(cmd, sub)
+        for cmd in ("tandem", "tandem --version"):
+            self.assertEqual(self.gate(cmd), ASK, cmd)
 
     def test_reads_and_harmless_redirects_pass(self):
         for cmd in ("git status", "git log -5", "go vet ./... 2>&1", "ls >/dev/null 2>&1", "grep -rn 'rm -rf' ."):
@@ -217,7 +188,6 @@ class PretoolWriteGateTest(AgyHookTestCase):
 
     def test_driver_is_not_gated(self):
         self.update(roles={"driver": "agy", "navigator": "claude"})
-        launch_agy.write_profile(session.load_session(self.dir), "driver")
         for cmd in ("touch notes.txt", "git commit -am wip", "echo x > f", "tandem done", "tandem recv"):
             self.assertEqual(self.gate(cmd), ASK, cmd)
 
@@ -228,45 +198,6 @@ class PretoolWriteGateTest(AgyHookTestCase):
     def test_agy_without_role_is_gated(self):
         self.update(roles={"driver": "claude", "navigator": "someone"})
         self.assertEqual(self.gate("touch x")["decision"], "force_ask")
-
-
-class PretoolProfileTest(AgyHookTestCase):
-    """Only the sandboxed navigator profile has `unsandboxed(...)` rules to approve a forced bypass."""
-
-    def use(self, kind):
-        launch_agy.write_profile(session.load_session(self.dir), kind)
-
-    def test_fallback_profile_passes_through_to_its_command_rules(self):
-        self.use("fallback")
-        for cmd in ("tandem recv", "tandem watch --as navigator --detach", "go test ./..."):
-            self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
-        self.assertEqual(self.out("agy-pretool", pretool("touch x"))["decision"], "force_ask")
-        self.assertEqual(self.out("agy-pretool", pretool("tandem done"))["decision"], "force_ask")
-        # The protocol's `cd <repo> && <command>` form: agy's rules approve each part, the gate
-        # still sees a write behind the `cd`.
-        cd = "cd %s && " % self.meta["repo"]
-        self.assertEqual(self.out("agy-pretool", pretool(cd + "go test ./...")), ASK)
-        self.assertEqual(self.out("agy-pretool", pretool(cd + "git diff")), ASK)
-        self.assertEqual(self.out("agy-pretool", pretool(cd + "touch x"))["decision"], "force_ask")
-
-    def test_driver_profile_never_forces_a_bypass(self):
-        self.update(roles={"driver": "agy", "navigator": "claude"})
-        self.use("driver")
-        for cmd in ("tandem send --to navigator 'plan'", "tandem watch --as driver --detach", "go test ./...", "touch x"):
-            self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
-
-    def test_missing_or_unreadable_profile_passes_through(self):
-        path = launch_agy.profile_path(self.sdir)
-        os.remove(path)
-        self.assertEqual(self.out("agy-pretool", pretool("tandem recv")), ASK)
-        with open(path, "w") as f:
-            f.write("{")
-        self.assertEqual(self.out("agy-pretool", pretool("tandem recv")), ASK)
-
-    def test_navigator_profile_forces_the_bypass(self):
-        self.use("fallback")
-        self.use("navigator")
-        self.assertEqual(self.out("agy-pretool", pretool("tandem recv")), BYPASS)
 
 
 class PretoolInputTest(AgyHookTestCase):
@@ -284,8 +215,8 @@ class PretoolInputTest(AgyHookTestCase):
         self.assertEqual(self.out("agy-pretool", json.dumps(data)), ASK)
 
     def test_unexpected_exception(self):
-        with mock.patch("tandem.cmdline.bypass_prefix", side_effect=RuntimeError("boom")):
-            self.assertEqual(self.out("agy-pretool", pretool("tandem recv")), ASK)
+        with mock.patch("tandem.cmdline.write_reason", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.out("agy-pretool", pretool("touch x")), ASK)
         self.assertIn("agy-pretool: RuntimeError: boom", self.hooks_log())
 
     def test_unknown_session(self):
@@ -294,9 +225,9 @@ class PretoolInputTest(AgyHookTestCase):
         self.assertIn("agy-pretool", err)
 
     def test_via_shim(self):
-        proc = self.run_shim("--session", self.dir, "hook", "agy-pretool", stdin=pretool("tandem recv"))
+        proc = self.run_shim("--session", self.dir, "hook", "agy-pretool", stdin=pretool("touch x"))
         self.assertEqual(proc.returncode, 0)
-        self.assertEqual(json.loads(proc.stdout), BYPASS)
+        self.assertEqual(json.loads(proc.stdout)["decision"], "force_ask")
 
 
 class ConversationIdTest(AgyHookTestCase):
@@ -320,7 +251,7 @@ class ConversationIdTest(AgyHookTestCase):
     def test_atomic_write_leaves_no_temp_files(self):
         self.out("agy-pretool", self.stdin_for("agy-pretool", "conv-a"))
         self.out("agy-pretool", self.stdin_for("agy-pretool", "conv-b"))
-        self.assertEqual(sorted(os.listdir(os.path.join(self.sdir, "peers", "agy"))), ["conversation_id", "profile.json"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.sdir, "peers", "agy"))), ["conversation_id"])
 
     def test_written_through_rename(self):
         with mock.patch.object(session, "write_text_atomic", wraps=session.write_text_atomic) as w:
@@ -342,7 +273,7 @@ class ConversationIdTest(AgyHookTestCase):
     def test_write_failure_still_decides(self):
         with mock.patch.object(session, "write_text_atomic", side_effect=OSError("read-only")):
             self.assertEqual(self.out("agy-pretool", self.stdin_for("agy-pretool", "c")), ASK)
-            self.assertEqual(self.out("agy-pretool", pretool("tandem recv", conversationId="c2")), BYPASS)
+            self.assertEqual(self.out("agy-pretool", pretool("tandem recv", conversationId="c2")), ASK)
         self.assertIn("agy-pretool: OSError: read-only", self.hooks_log())
 
     def test_written_for_ended_session(self):
