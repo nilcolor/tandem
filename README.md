@@ -54,7 +54,8 @@ show where things stand. When the work is done the driver writes its wrap-up, as
 - The single-writer rule is enforced at the harness permission level, not by prompt text, because a
   reviewer that spots a bug will "just fix it" despite instructions. Claude as navigator: deny rules
   for Edit, Write and NotebookEdit (its Bash isn't gated yet, see the backlog). agy as navigator: a `write_file(*)` deny plus the tandem `PreToolUse` write
-  gate on shell commands, because agy 1.5.5's sandbox no longer makes the workspace read-only; see
+  gate on shell commands, because agy 1.5.5's sandbox no longer makes the workspace read-only and
+  from 1.5.6 the navigator runs without a sandbox; see
   [Permissions](#permissions-autonomy-without-prompt-fatigue).
 - The navigator reviews evidence (diffs, commits, test runs it ran itself), not chat claims.
 
@@ -199,7 +200,7 @@ opens panes: the user runs each launcher in whatever terminal they like.
 | Command | Does |
 |---|---|
 | `tandem claude [--role driver\|navigator]` | writes per-session Claude settings (Stop hook with `asyncRewake`, `UserPromptSubmit` human-input log, permissions) into the session dir; `exec claude --add-dir <session-dir> --settings <file> --append-system-prompt <protocol> [extra] -- <tandem: prompt>` |
-| `tandem agy [--role navigator\|driver] [--profile auto\|fallback]` | runs the navigator self-check, writes the agy profile (sandbox + `unsandboxed(<test cmd>)` for the navigator, `--mode auto` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir> [--mode auto] --prompt-interactive=<tandem: prompt> [extra]` |
+| `tandem agy [--role navigator\|driver] [--profile auto\|fallback]` | picks the navigator profile (fallback on agy 1.5.6 and later, otherwise the self-check decides), writes the agy profile (`command(...)` allowlist, or on 1.5.4–1.5.5 sandbox + `unsandboxed(<test cmd>)`, for the navigator; `--mode accept-edits` and `write_file(...)` for `plan.md`/`decisions.md` for a driver) and the hooks/rules into the session dir; `exec agy --settings <file> --add-dir <session-dir> [--mode accept-edits] --prompt-interactive=<tandem: prompt> [extra]` |
 | `tandem human` | small REPL: tails the `human` inbox (escalations, questions) and sends to either role |
 | `tandem dash` (later) | web dashboard over the session dir (`log.jsonl`, `plan.md`, `decisions.md`, inboxes); not designed yet, feasibility noted in [Dashboard](#dashboard-tandem-dash-later-stdlib-is-enough) |
 
@@ -243,7 +244,13 @@ opens panes: the user runs each launcher in whatever terminal they like.
   (`~/.gemini/antigravity-cli/settings.json` `permissions.deny`, read and never written,
   deduplicated). A user's `command(rm -rf)` stays in force under every profile. The user's global
   `allow` is not carried over: the profile's allowlist is the whole allowlist.
-- **Self-check (`tandem agy`, navigator, `--profile auto`).** `agy --version`, then
+- **agy 1.5.6 and later get the fallback profile (`tandem agy`, navigator, `--profile auto`).**
+  `agy --version` comes first. From 1.5.6 (`UNSANDBOXED_REMOVED_IN`), `unsandboxed(...)` rules are
+  gone and every sandbox bypass asks the user ([agy 1.5.6 live check](#agy-156-live-check-2026-11-12)),
+  so the sandboxed navigator profile would prompt on each tandem command. The launcher prints a
+  one-line note, uses the fallback profile and runs no self-check, which couldn't tell (`/config`
+  still echoes the rules). An `agy --version` that isn't a plain `x.y.z` keeps the self-check path.
+- **Self-check (`tandem agy`, navigator, `--profile auto`, agy before 1.5.6).** `agy --version`, then
   `agy --settings <navigator profile in a temp dir> -p=/config --output-format json` (30 s timeout,
   no model turn). It passes when the printed config shows the profile's `toolPermission`,
   `enableTerminalSandbox` and every allow and deny rule, and agy says nothing about `unsandboxed`
@@ -262,8 +269,20 @@ opens panes: the user runs each launcher in whatever terminal they like.
   navigator and uses the driver profile.
 - `tandem agy` starts agy with `--prompt-interactive=<tandem: line>`, which gives agy a first turn in
   the TUI, so `SessionStart` fires and tells it to start its watcher; `agy-preinvocation` skips the
-  line. A driver also gets `--mode auto`. agy's own arguments go after `--`.
-- Consequence: the tandem commands agents run must run outside the sandbox, the same as tests. The
+  line. A driver also gets `--mode accept-edits` (`auto` needs the terminal sandbox, which the
+  driver profile turns off, so agy silently fell back to the default mode and asked before every
+  edit; [flipped-roles run](#agy-156-live-check-2026-11-12)). agy's own arguments go after `--`.
+- agy's `run_command` runs in the session dir (the `--add-dir`), not the repo the launcher `cd`s
+  to. Live on 1.5.6: `pwd` printed the session dir with the protocol naming the repo, with a second
+  `--add-dir <repo>` before or after it (the conversation lists the session dir as the first
+  workspace root either way), and with a `PreToolUse` `overwrite` setting `Cwd` to the repo (agy
+  reported the change and ignored it; its `run_command` takes no `Cwd`). Each command gets a new
+  shell, so a `cd` doesn't carry over. The protocol therefore has agy run repo commands as
+  `cd <repo> && <command>`, which agy's rules approve part by part (`cd` is on agy's own system
+  allowlist) and the write gate still checks; tandem commands stay plain, since they work from any
+  directory. Under the sandboxed 1.5.4–1.5.5 profile such a compound command gets no bypass.
+- Consequence (sandboxed navigator profile, agy 1.5.4–1.5.5): the tandem commands agents run must
+  run outside the sandbox, the same as tests. The
   sandbox blocks reads outside the workspace, and `tandem` needs the shim and package from its
   checkout plus `~/.tandem/repos/`. On 1.5.4 the session dir itself was read-only inside the sandbox
   too. Only the subcommands the protocol has agents type are bypassed: the hook forces
@@ -334,12 +353,12 @@ blocking command.
 | `tandem init [name] [--ticket KEY] [--task TEXT \| --task-file F] [--test-cmd CMD]... [--replace]` | create the session tree and point the repo at it. `--test-cmd` (repeatable) replaces detection: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec` |
 | `tandem send [--as R] --to R [--type T] [--reply-to ID] [--commit REV] [--file PATH]... [--expects-reply \| --no-reply] [body]` | body as the argument, else from stdin (refused on a terminal); tmp, mv to new, append to log. `expects_reply` defaults to true for `plan`, `review_request`, `question` and `escalate` |
 | `tandem recv [--as R] [--wait] [--timeout S] [--peek] [--json]` | pop the oldest (lowest-id) `new/` message to `cur/` and print it; `--peek` doesn't consume; `--timeout` implies `--wait`; exit 3 and `no mail for <role>` on stderr when nothing arrives; a wait gives up once the session has ended |
-| `tandem watch [--as R] (--once [--deadline S] \| --detach)` | wait for mail and ring the harness doorbell; driver and navigator only. `--once` (Claude's asyncRewake waiter): exit 2 with the doorbell on stderr when an unread message above `peers/<role>/rung` arrives (one ring per batch, for the highest id; mail left unread isn't rung again), exit 0 at `--deadline`, when the session ends, or when a newer waiter's pid takes over `peers/<role>/watch.pid` (`{"pid": …, "ls_address": null}`, removed on exit). `--detach` (agy, run by agy itself through `run_command`; refuses without `ANTIGRAVITY_LS_ADDRESS`/`ANTIGRAVITY_CSRF_TOKEN`): double-forks a watcher into its own session with stdio on `peers/<role>/watch.log`, prints its pid and returns at once. The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`, the id read from `peers/agy/conversation_id` on every ring (fallback `ANTIGRAVITY_CONVERSATION_ID`); a failed send (non-zero exit or an `{"error":…}` reply) isn't marked rung and is retried every 5 s. Pidfile `{pid, ls_address}`: a live watcher for the same LS address means "already running" (decided by the detached child under the session lock), any other pidfile is taken over. It exits when the LS port refuses a connect (checked every 5 s), when superseded, when the session ends or on SIGTERM, and logs `watcher_started`/`watcher_exited` events. `ANTIGRAVITY_LS_ADDRESS` is read as `host:port`, `[v6]:port` or a URL such as `http://host:port/`; the exact form agy uses is unverified (plan Task 17), so an address in none of those forms skips the LS check (logged once) instead of reading as a gone server |
+| `tandem watch [--as R] (--once [--deadline S] \| --detach)` | wait for mail and ring the harness doorbell; driver and navigator only. `--once` (Claude's asyncRewake waiter): exit 2 with the doorbell on stderr when an unread message above `peers/<role>/rung` arrives (one ring per batch, for the highest id; mail left unread isn't rung again), exit 0 at `--deadline`, when the session ends, or when a newer waiter's pid takes over `peers/<role>/watch.pid` (`{"pid": …, "ls_address": null}`, removed on exit). `--detach` (agy, run by agy itself through `run_command`; refuses without `ANTIGRAVITY_LS_ADDRESS`/`ANTIGRAVITY_CSRF_TOKEN`): double-forks a watcher into its own session with stdio on `peers/<role>/watch.log`, prints its pid and returns at once. The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`. The id is read on every ring from the one `presence/<conversation>.lock` the agy process holds open (`/proc/<pid>/fd` on Linux, `lsof -p` on macOS; the agy pid is the nearest `agy` above the `--detach` call, or `TANDEM_AGY_PID`), else from `peers/agy/conversation_id`, else `ANTIGRAVITY_CONVERSATION_ID`; a failed send (non-zero exit or an `{"error":…}` reply) isn't marked rung and is retried every 5 s. Pidfile `{pid, ls_address}`: a live watcher for the same LS address means "already running" (decided by the detached child under the session lock), any other pidfile is taken over. It exits when the LS port refuses a connect (checked every 5 s), when superseded, when the session ends or on SIGTERM, and logs `watcher_started`/`watcher_exited` events. `ANTIGRAVITY_LS_ADDRESS` is read as `host:port`, `[v6]:port` or a URL such as `http://host:port/`; agy 1.5.6 gives a `run_command` child `localhost:<port>`, and an address in none of those forms skips the LS check (logged once) instead of reading as a gone server |
 | `tandem log [--json] [-f]` | print `log.jsonl` readably (`--json`: lines as stored); `-f` follows by byte offset and stops once the session has ended |
 | `tandem status` | every active session (`--session` narrows to one, ended or not): pending counts per inbox, last message sent by each role, watcher liveness from `peers/<role>/watch.pid`, stale repo pointers |
 | `tandem done` | write `summary.md`, mark the session ended, log `done` and clear the repo's active-session pointer; refuses an ended session |
 | `tandem human` | REPL for the user, sending as `human`; refuses an ended session. Every 1 s it pops new `human` mail to `cur/` and prints it, then reads input lines (one line is one message). `@driver <text>` / `@navigator <text>` answer (`reply_to`) the latest message from that role the user has read (`inbox/human/cur/`), else send a `decision`; `@role:<type> <text>` sets the type (only `answer` threads); bare text goes to the driver; a mistyped `@role`, type or `/command` is refused, never sent. `/log` and `/status` print this session's `tandem log` / `tandem status` output, `/help`, `/quit`. Ctrl-D, Ctrl-C and `/quit` exit 0; when the session ends (`tandem done` elsewhere) it prints any last mail, says so and exits 0 |
-| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. The hook fires before every model call of a turn with the same input and the payload carries no known turn marker, so the same text typed twice in a row (`yes`, then `yes`) is logged once (plan Task 17 looks for a marker). `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
+| `tandem hook <event>` | internal, run by the generated harness configs: stdin JSON in, the hook's JSON (or nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved). `claude-prompt` (UserPromptSubmit) appends `{"kind":"console","from":"human","to":<role claude holds in session.json>,"peer":"claude","body":<prompt>}` to `log.jsonl` and prints nothing, since its stdout would join the model's context; it skips blank prompts, prompts starting with `tandem:` (the launcher's start line), an asyncRewake wake (a prompt starting with `<task-notification>` that carries the doorbell, which is how Claude 2.1.322 delivers the Stop hook's wake to `UserPromptSubmit`; seen live in plan Task 17) and ended sessions. The agy hooks all write `conversationId` to `peers/agy/conversation_id` (tmp + rename) first. `agy-pretool` (PreToolUse, `run_command`) prints the bypass, `force_ask` or `ask` decision described under [Permissions → Decision](#decision), never `{}`. `agy-session-start` injects a system message naming agy's role and session, the exact watcher command when no live agy watcher holds `peers/<role>/watch.pid`, and the pending count (that mail is then marked rung). `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. The hook fires before every model call of a turn with the same input and the payload carries no known turn marker, so the same text typed twice in a row (`yes`, then `yes`) is logged once (plan Task 17 looks for a marker). `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail (marked rung); otherwise `{}`. Ended sessions get the no-op output |
 
 ## Waking an agent: the doorbell rule
 
@@ -380,21 +399,26 @@ Behaviour verified with a probe watcher (2026-11-10):
 | Hook (`PreToolUse` etc.) | **no**: only `ANTIGRAVITY_CONVERSATION_ID` | can't call `agentapi` itself |
 | `nohup … &` from a `run_command` | **yes** | survives the turn; must run unsandboxed, because the sandbox blocks loopback to the LS |
 
-Chosen design (implemented; the live run is pending, plan Task 17):
+Chosen design (implemented; live-checked on agy 1.5.6 in plan Task 17):
 
 - agy starts `tandem watch --as <role> --detach` itself via `run_command`. `--detach` double-forks out
-  of the tool call in place of the probes' `nohup … &`, so the command has no shell metacharacters;
-  the tandem `PreToolUse` hook forces the bypass and `unsandboxed(tandem watch)` approves it, so it
-  never prompts. Under the fallback and driver profiles (no sandbox) the hook passes it through and
-  `command(tandem watch)` approves it.
+  of the tool call in place of the probes' `nohup … &`, so the command has no shell metacharacters.
+  Under the fallback and driver profiles (no sandbox; the navigator's default from agy 1.5.6) the
+  hook passes it through and `command(tandem watch)` approves it. Under the sandboxed navigator
+  profile (1.5.4–1.5.5) the hook forces the bypass and `unsandboxed(tandem watch)` approves it.
 - A `SessionStart` hook injects a system message naming agy's role, the exact watcher command when no
   live watcher holds the pidfile, and any pending mail, so the model doesn't have to remember it from
   the protocol.
 - A `Stop` hook is the watchdog and the mail piggyback: when agy stops fully idle (`NO_TOOL_CALL`) it
   returns `continue` to restart a dead watcher (at most once per 60 s, so a watcher that can't start
   can't loop agy) and/or to read mail no ring has announced.
-- Hooks know the current `conversationId` on every event, so they write it to the session dir and the
-  watcher reads the target from there on each ring. That fixes `/new`.
+- The watcher rings the conversation agy shows: agy keeps exactly one
+  `~/.gemini/antigravity-cli/presence/<conversation>.lock` open per process and moves it on `/new`,
+  so the watcher reads that lock from the agy pid it found above itself at `--detach` time. Hooks
+  also write `conversationId` to the session dir on every event, the fallback when the lock can't be
+  read. Hooks alone don't cover `/new`: it fires no hook, so the file named the old conversation
+  until the user typed, and a ring in between woke the old conversation in the background (the
+  flipped-roles run).
 - An agy restart changes the LS address and token, so a watcher left over from a previous process
   exits when its LS port refuses a connect; the next `SessionStart` or the watchdog starts a fresh one.
 
@@ -482,7 +506,11 @@ user's own config stays untouched.
 
 ### Decision
 
-- **Navigator profile: sandboxed, with bypass rules for the project's test commands.**
+- **Navigator profile on agy 1.5.6 and later: the fallback profile below.** 1.5.6 removed
+  `unsandboxed(...)` rules and asks before every sandbox bypass, so the sandboxed profile can't run
+  tandem or tests without prompts ([1.5.6 live check](#agy-156-live-check-2026-11-12)).
+- **Navigator profile on agy 1.5.4–1.5.5: sandboxed, with bypass rules for the project's test
+  commands.**
 
   ```json
   {
@@ -533,27 +561,31 @@ user's own config stays untouched.
      or `git branch` listing, `git config --get`, `git remote -v`) aren't. Wrappers are skipped with
      their option values (`sudo -u bob rm x` is `rm`). Rules live in `tandem/cmdline.py`.
   3. anything else → `{"decision":"ask"}`, the pass-through, which runs sandboxed with no prompt.
-- **Fallback profile** (`tandem agy --profile fallback`, or automatic when the self-check fails), for
-  when `unsandboxed` rules stop working: no sandbox,
-  `request-review`, a tight allowlist (read-only git, the protocol's tandem subcommands such as
+- **Fallback profile** (the navigator's default on agy 1.5.6 and later, `tandem agy --profile
+  fallback`, or automatic when the self-check fails), for when `unsandboxed` rules stop working:
+  no sandbox,
+  `request-review`, a tight allowlist (read-only git: `git status|diff|log|show` and the same as
+  `git -C <repo> …`, which agy uses unprompted; the protocol's tandem subcommands such as
   `command(tandem send)`, the exact test commands such as `command(dip rspec)`, never
   `command(dip)`), `write_file(*)` denied, and the hook gating shell writes.
-  tandem checks at startup that agy loads the navigator profile as written and switches to this
-  profile if it doesn't; a version not yet verified live only warns (see the self-check under
+  Before 1.5.6, tandem checks at startup that agy loads the navigator profile as written and
+  switches to this profile if it doesn't; a version not yet verified live only warns (see the self-check under
   [Launchers](#launchers-tandem-peer-is-the-per-peer-adapter)). Every profile's `deny` also carries
   the user's global agy deny rules.
-- **Driver profile (when agy drives)**: `--mode auto`, `toolPermission: request-review`, allow the
-  driver's tandem subcommands (the navigator's plus `command(tandem done)`), the test commands and
-  `command(git)`, `deny` = the user's global agy deny (often empty), no sandbox
+- **Driver profile (when agy drives)**: `--mode accept-edits`, `toolPermission: request-review`,
+  allow the driver's tandem subcommands (the navigator's plus `command(tandem done)`), the test
+  commands, `command(git)`, and `write_file(<session dir>/plan.md)` and
+  `write_file(<session dir>/decisions.md)` (outside the workspace, so `accept-edits` alone asks),
+  `deny` = the user's global agy deny (often empty), no sandbox
   (the driver needs network and the full toolchain; on 1.5.4 the sandbox also made the workspace
   read-only). Prompts are left only for irreversible actions, which the user wants to see anyway.
 - **Safety net for any profile**: the driver runs `git status` at each checkpoint and treats any change
   it didn't make as a navigator violation. Tests legitimately write gitignored paths (`coverage/`,
   `log/`, `tmp/`), which `git status` already ignores.
-- The doorbell never prompts: agy's `tandem watch` is started once through `run_command` with the
-  bypass forced by the hook and approved by `unsandboxed(tandem watch)` (or, without the sandbox,
-  approved by `command(tandem watch)`), and each ring is an `agentapi` call from that watcher, not a
-  tool call.
+- The doorbell never prompts: agy's `tandem watch` is started once through `run_command`, approved
+  by `command(tandem watch)` (or, under the sandboxed 1.5.4–1.5.5 profile, with the bypass forced by
+  the hook and approved by `unsandboxed(tandem watch)`), and each ring is an `agentapi` call from
+  that watcher, not a tool call.
 - Claude gets a per-session settings file too: `Bash(<prefix> *)` allowed for the same prefixes
   (the role's tandem subcommands and the test commands, so neither role prompts on a test run), and
   for a navigator `Edit`, `Write` and `NotebookEdit` denied. Its Bash isn't write-gated yet
@@ -674,10 +706,15 @@ conversation's `SessionStart` hook can inject "you have pending mail, run `tande
 - Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: the
   navigator's agy sandbox only bypasses plain commands, and both harnesses' permission rules match
   the command text.
+- agy is told to run repo commands as `cd <repo> && <command>` (its shell starts in the session
+  dir), otherwise in plain form (no `git -C <path>`, no absolute paths), and to read files with its
+  file tools. On the 1.5.6 run the fallback
+  navigator reached for `git -C /…/apix diff`, `make -C /…/apix help` and
+  `go tool cover -func=/…/tmp/cover.out`, and each one asked the user.
 - The driver ends a session only after the user confirms, and puts its narrative in `decisions.md`
   and its `done` message, because `tandem done` regenerates `summary.md`.
 
-## agy facts (1.5.4, re-checked on 1.5.5)
+## agy facts (1.5.4, re-checked on 1.5.5 and 1.5.6)
 
 The behaviour above (sandbox, bypass, hooks, `agentapi`) was verified on agy 1.5.4. On 1.5.5 the
 config was re-run in print mode ([re-check](#agy-155-re-check-2026-11-11)) and one live session
@@ -791,6 +828,45 @@ Conclusions:
 - `--prompt-interactive=<text>` starts the first turn in the TUI, so launchers can use it.
 - Declining a prompt interrupts the whole turn, so later tool calls in it don't run.
 
+### agy 1.5.6 live check (2026-11-12)
+
+The first plan Task 17 session, on agy 1.5.6, in a throwaway clone of apix with `tandem agy` on the
+then-default sandboxed navigator profile. The self-check passed (`check=ok`), with the expected
+"unverified on 1.5.6" note.
+
+- **`unsandboxed(...)` rules are gone.** The TUI opened with `Invalid "unsandboxed" permission
+  rules found; they are ignored and grant nothing:`, listing the profile's six rules (it named
+  `~/.gemini/antigravity-cli/settings.json` as their file although they came from `--settings`). The
+  binary says `unsandboxed is no longer a valid rule, use command() instead`, and its tool docs say
+  `BypassSandbox: true` "Requires manual user approval".
+- **Every hook-forced bypass prompted**: `tandem watch --as navigator --detach` and `tandem recv`
+  both asked "can I run this command". So on 1.5.6 the sandboxed profile prompts on each tandem
+  command and test run, and tandem now gives the navigator the fallback profile from 1.5.6 on.
+- The self-check can't see this: `/config` still echoes the rules, and print mode shows no warning.
+- `ANTIGRAVITY_LS_ADDRESS` in a `run_command` child is `localhost:<port>` (`localhost:64249`), the
+  bare `host:port` form the watcher already parses.
+- The detached watcher started and wrote `{pid, ls_address}`; `tandem recv` exited 3 (no mail),
+  which agy's TUI shows as "failed".
+- The `PreInvocation` hook had already recorded the initial `tandem:` prompt and the conversation
+  id while the workspace trust prompt was still on screen.
+
+The rest of that run, on the fallback profile, and a second session with roles flipped (agy driver,
+Claude navigator) are recorded in plan Task 17. What changed tandem:
+
+- An asyncRewake wake reaches Claude's `UserPromptSubmit` as a `<task-notification>` block carrying
+  the doorbell and was logged as human input; the prompt hook now skips it.
+- The fallback navigator ran `git -C <abs repo> diff`, `make -C … help` and
+  `go tool cover -func=<abs path>`, each off the allowlist and so each a prompt. agy's commands start
+  in the session dir (`pwd`), which is why it reached for `-C`. The profile now allows
+  `git -C <repo> status|diff|log|show`, and the protocol has agy run repo commands as
+  `cd <repo> && <command>`.
+- `--mode auto` for a driver logged `auto mode is unavailable, falling back to default`: auto needs
+  the terminal sandbox. Edits then asked, `plan.md` and `decisions.md` included (outside the
+  workspace). Drivers now launch with `accept-edits` plus `write_file(...)` for those two files.
+- After `/new` the watcher rang the old conversation (hooks hadn't fired yet), which handled the mail
+  out of sight. agy holds `presence/<conversation>.lock` open for the conversation it shows, so the
+  watcher now reads that.
+
 ### Claude Code permission rules (docs, 2026-11-11)
 
 From code.claude.com/docs/en/permissions and /settings:
@@ -829,13 +905,15 @@ None blocking v0. What's left is live-only or out of scope:
    under `proceed-in-sandbox` is still open: plan Task 17.
 6. ~~What the `tandem agy` self-check can test.~~ Settled in Task 15: `/config` proves the profile
    parses and its rules survive; the version decides the rest. `VERIFIED_AGY_VERSIONS` (1.5.4,
-   1.5.5) holds the versions where a live session confirmed the bypass; any other version warns and
-   keeps the navigator profile. Add a version there after re-running the live probe on it.
-7. Live-only, pending plan Task 17: asyncRewake waking a Claude launched by `tandem claude` and the
-   `--` before its initial prompt; agy starting the watcher and running `tandem send`/`recv` and the
-   test commands with no prompt; that 1.5.5 hooks still get no `ANTIGRAVITY_LS_ADDRESS` (1.5.4: only
-   the conversation id), so a hook judges a watcher by its pid alone until the watcher's own LS
-   check ends it; `--mode auto` for an agy driver; a real agy restart and `/new`; agy as driver and
-   on the fallback profile starting its watcher and running tandem and tests with no prompt
-   (`command(...)` rules, no forced bypass); the exact form of `ANTIGRAVITY_LS_ADDRESS`; whether
-   `PreInvocation` carries a per-turn marker.
+   1.5.5) holds the versions where a live session confirmed the bypass; any other version before
+   1.5.6 warns and keeps the navigator profile. Add a version there after re-running the live probe
+   on it. From 1.5.6 the check doesn't run: those versions have no `unsandboxed` rules.
+7. Live checks (plan Task 17). Settled on agy 1.5.6 and Claude 2.1.322: asyncRewake wakes a Claude
+   launched by `tandem claude`; agy as navigator (fallback) and as driver starts its watcher and
+   runs tandem and test commands with no prompt; a real agy restart; `tandem human` and an
+   escalation; `ANTIGRAVITY_LS_ADDRESS` is `localhost:<port>`; `accept-edits` and the
+   session-file `write_file` rules for a driver; after `/new` a ring reaches the new conversation
+   (which acts on it once it has had a turn: type something first); the fallback navigator's
+   `tandem done` gets the gate's prompt; agy's commands run in the session dir whatever tandem
+   passes (hence `cd <repo> &&`). `cd <repo> && go test ./...` runs with no prompt. Still open: whether
+   `PreInvocation` carries a per-turn marker, and whether agy hooks see `ANTIGRAVITY_LS_ADDRESS`.

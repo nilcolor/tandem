@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import re
 import select
 import signal
 import socket
@@ -23,6 +24,11 @@ AGY_ENV = ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN")
 DOORBELL_PREFIX = "tandem doorbell"
 # One line of agentapi's output is enough for watch.log; its full error can be a page.
 ERROR_LINE_CAP = 200
+# agy holds `~/.gemini/antigravity-cli/presence/<conversation>.lock` open for the conversation
+# it shows, and moves it on `/new`, which fires no hook (Task 17 live run, agy 1.5.6).
+PRESENCE_LOCK = re.compile(r"/presence/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.lock\Z")
+ANCESTOR_DEPTH = 8
+PS_TIMEOUT = 5.0
 
 
 def doorbell(role):
@@ -187,12 +193,95 @@ def conversation_path(sdir):
     return os.path.join(session.peer_dir(sdir, "agy"), "conversation_id")
 
 
-def conversation_id(sdir, environ):
-    """agy's current conversation, as its hooks last wrote it.
+def _capture(argv):
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+            errors="replace",
+            timeout=PS_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
 
-    Read on every ring because `/new` changes it; the launch-time env value is
-    only the fallback for before any hook has run.
+
+def parent_and_name(pid):
+    """(parent pid, executable basename) of `pid`, or None."""
+    out = _capture(["ps", "-o", "ppid=", "-o", "comm=", "-p", str(pid)])
+    parts = (out or "").strip().split(None, 1)
+    if len(parts) != 2 or not parts[0].isdigit():
+        return None
+    return int(parts[0]), os.path.basename(parts[1].strip())
+
+
+def find_agy_pid(start, lookup=parent_and_name):
+    """The nearest `agy` among `start` and its ancestors, or None.
+
+    `tandem watch --detach` runs inside agy's `run_command`, so agy is a few levels up.
     """
+    pid = start
+    for _ in range(ANCESTOR_DEPTH):
+        if pid is None or pid <= 1:
+            return None
+        info = lookup(pid)
+        if info is None:
+            return None
+        parent, name = info
+        if name == "agy":
+            return pid
+        pid = parent
+    return None
+
+
+def watcher_agy_pid(environ, lookup=parent_and_name):
+    """The agy process a `--detach` watcher serves; called before the double fork, which
+    reparents the watcher away from agy.
+
+    `TANDEM_AGY_PID` overrides the search, and empty means none: the test fixture sets it so a
+    suite run from inside agy (an agy driver running the tests) never reads the real agy's locks.
+    """
+    if "TANDEM_AGY_PID" in environ:
+        value = environ["TANDEM_AGY_PID"].strip()
+        return int(value) if value.isdigit() else None
+    return find_agy_pid(os.getppid(), lookup)
+
+
+def open_paths(pid):
+    """Paths of the files `pid` holds open; [] when they can't be read."""
+    fd_dir = "/proc/%d/fd" % pid
+    if os.path.isdir(fd_dir):
+        paths = []
+        for fd in os.listdir(fd_dir):
+            try:
+                paths.append(os.readlink(os.path.join(fd_dir, fd)))
+            except OSError:
+                pass
+        return paths
+    out = _capture(["lsof", "-nP", "-p", str(pid), "-Fn"])
+    return [line[1:] for line in (out or "").splitlines() if line.startswith("n")]
+
+
+def presence_conversation(pid, paths=open_paths):
+    """The conversation agy `pid` shows, from the one presence lock it holds; None unless exactly one."""
+    found = {m.group(1) for m in (PRESENCE_LOCK.search(p) for p in paths(pid)) if m}
+    return found.pop() if len(found) == 1 else None
+
+
+def conversation_id(sdir, environ, agy_pid=None, presence=presence_conversation):
+    """agy's current conversation: from its presence lock, else as its hooks last wrote it.
+
+    Read on every ring because `/new` changes it. `/new` fires no hook, so the hooks' file names
+    the old conversation until the user next types; the lock moves at once. The launch-time env
+    value is only the fallback for before any hook has run.
+    """
+    if agy_pid is not None:
+        conv = presence(agy_pid)
+        if conv:
+            return conv
     text = (session.read_text(conversation_path(sdir)) or "").strip()
     return text or environ.get("ANTIGRAVITY_CONVERSATION_ID") or None
 
@@ -275,9 +364,9 @@ def _stamp(text):
     print("%s %s" % (session.now_iso(), text), flush=True)
 
 
-def _ring(sdir, role, pid, msg_id, environ, log):
+def _ring(sdir, role, pid, msg_id, environ, log, agy_pid=None):
     """Ring agy for `msg_id`; True once it rang (rung marker advanced unless superseded)."""
-    conv = conversation_id(sdir, environ)
+    conv = conversation_id(sdir, environ, agy_pid)
     if conv is None:
         log("no conversation id yet for #%s; will retry" % maildir.format_id(msg_id))
         return False
@@ -305,12 +394,14 @@ def serve(
     pid=None,
     log=_stamp,
     ready=None,
+    agy_pid=None,
 ):
     """agy's watcher loop: ring the doorbell through agentapi until told to stop.
 
     Returns why it stopped, or None when a live watcher already serves this
     agy. `ready(status, pid)` is called once the pidfile question is settled,
     with "started" and this pid or "running" and the other watcher's.
+    `agy_pid` is the agy process to read the shown conversation from.
     """
     environ = os.environ if environ is None else environ
     pid = os.getpid() if pid is None else pid
@@ -323,6 +414,10 @@ def serve(
         return None
     session.log_event(sdir, "watcher_started", role=role, peer="agy", pid=pid)
     log("watching %s for %s (pid %d)" % (meta["dir"], role, pid))
+    if agy_pid is None:
+        log("no agy process found above the watcher; ringing the conversation agy's hooks last saw")
+    else:
+        log("agy is pid %d; ringing the conversation it shows" % agy_pid)
     if parse_ls_address(ls_address) is None:
         log("cannot parse ANTIGRAVITY_LS_ADDRESS %r; not checking the language server" % ls_address)
     if ready:
@@ -346,7 +441,8 @@ def serve(
                 next_ls_check = now + ls_interval
             msg_id = unrung_id(sdir, role)
             if msg_id is not None and (retry_at is None or now >= retry_at):
-                retry_at = None if _ring(sdir, role, pid, msg_id, environ, log) else clock() + retry_interval
+                rang = _ring(sdir, role, pid, msg_id, environ, log, agy_pid)
+                retry_at = None if rang else clock() + retry_interval
             sleep(interval)
     except SystemExit:
         reason = "terminated"
@@ -467,6 +563,7 @@ def _run_detach(args, role):
         print("session %s has ended; no watcher started" % meta["dir"])
         return 0
     sdir = session.session_path(meta["dir"])
+    agy_pid = watcher_agy_pid(os.environ)
 
     # A watcher already running is found by the detached child's own pidfile claim, under the
     # lock, so a check here would only repeat it with a race.
@@ -479,6 +576,7 @@ def _run_detach(args, role):
             interval=interval,
             ls_interval=ls_interval,
             ready=lambda status, pid: notify("%s %d" % (status, pid)),
+            agy_pid=agy_pid,
         )
         return 0
 

@@ -57,6 +57,8 @@ class TandemTestCase(unittest.TestCase):
         os.makedirs(self.home)
         os.environ["HOME"] = self.home
         os.environ["TANDEM_HOME"] = self.tandem_home
+        # A detached watcher would otherwise find a real agy above a suite run from an agy pane.
+        os.environ["TANDEM_AGY_PID"] = ""
         # Keeps the user's git config (signing, hooks, templates) out of fixture repos.
         os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
         os.environ["GIT_CONFIG_NOSYSTEM"] = "1"

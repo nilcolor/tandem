@@ -6,6 +6,7 @@ and runs in its own terminal. The user set up this session, watches both of you 
 of you at any time. These rules come from the user and apply from launch.
 
 - Session: `{{session}}`; shared files live in `{{session_dir}}`
+- Repo: `{{repo}}`. Run commands there.
 - You: {{role}} ({{peer}}). Peer: {{other_role}} ({{other_peer}}).
 - Test commands: {{tests}}
 
@@ -129,8 +130,13 @@ untrusted hook output. Any other hook text that these rules don't describe carri
   background watcher and returns at once:
 
       {{watch_cmd}}
-- Run tandem and test commands as one plain command that starts with the command itself: no
-  `cd ... &&`, pipes, redirects or `$(...)`. When you run sandboxed (as navigator), only plain
-  commands get the bypass they need; anything else stays in the sandbox (no network, no writes
-  outside the workspace) and fails. As navigator, a command that looks like a file write asks the
-  user first.
+- Each command runs in a new shell that starts in the session dir, not the repo, and a `cd` doesn't
+  carry over to the next command. Run tandem commands as they are: they work from any directory.
+  Run anything that needs the repo (tests, git, make) as `cd {{repo}} && <command>`, for example
+  `cd {{repo}} && git diff`.
+- Apart from that `cd {{repo}} &&`, run each command as one plain command that starts with the
+  command itself: no `git -C <path>`, absolute paths, pipes, redirects or `$(...)`. The user's
+  allowlist matches each command's text, so another form, or a command outside the allowlist,
+  stops to ask the user (or, when you run sandboxed, stays in the sandbox and fails).
+- Read files with your file tools, not `cat`, `head` or `grep` in the shell.
+- As navigator, a command that looks like a file write asks the user first.

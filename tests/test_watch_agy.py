@@ -355,6 +355,90 @@ class RingTest(AgyWatchTestCase):
         self.assertEqual(maildir.watcher_state(self.sdir, "navigator"), "not running")
 
 
+CONV_A = "aaaaaaaa-1111-2222-3333-444444444444"
+CONV_B = "bbbbbbbb-1111-2222-3333-444444444444"
+
+
+class PresenceTest(AgyWatchTestCase):
+    """The watcher rings the conversation agy shows, read from the presence lock agy holds."""
+
+    def hold_lock(self, conv):
+        presence = os.path.join(self.tmp, "presence")
+        os.makedirs(presence, exist_ok=True)
+        f = open(os.path.join(presence, conv + ".lock"), "w")
+        self.addCleanup(f.close)
+        return f
+
+    def test_ring_follows_the_held_lock_over_the_hooks_file(self):
+        # As after `/new`: the hooks' file still names the old conversation.
+        self.set_conversation("conv-old")
+        a = self.hold_lock(CONV_A)
+        self.deliver()
+        thread, _, lines = self.serve_in_thread(agy_pid=os.getpid())
+        self.wait_for(lambda: watch.read_rung(self.sdir, "navigator") == 1)
+        a.close()
+        self.hold_lock(CONV_B)
+        self.deliver()
+        self.wait_for(lambda: watch.read_rung(self.sdir, "navigator") == 2)
+        self.assertEqual([c["argv"][2] for c in self.calls()], [CONV_A, CONV_B])
+        self.assertIn("agy is pid %d; ringing the conversation it shows" % os.getpid(), lines)
+        self.finish(thread)
+
+    def test_no_single_lock_falls_back_to_the_hooks_file(self):
+        self.set_conversation("conv-1")
+        self.hold_lock(CONV_A)
+        self.hold_lock(CONV_B)
+        self.deliver()
+        thread, _, _ = self.serve_in_thread(agy_pid=os.getpid())
+        self.wait_for(lambda: len(self.calls()) == 1)
+        self.assertEqual(self.calls()[0]["argv"][2], "conv-1")
+        self.finish(thread)
+
+    def test_without_agy_pid_the_hooks_file_is_used(self):
+        self.set_conversation("conv-1")
+        self.hold_lock(CONV_A)
+        self.deliver()
+        thread, _, lines = self.serve_in_thread()
+        self.wait_for(lambda: len(self.calls()) == 1)
+        self.assertEqual(self.calls()[0]["argv"][2], "conv-1")
+        self.assertTrue(any("no agy process found" in line for line in lines))
+        self.finish(thread)
+
+    def test_open_paths_sees_a_held_lock(self):
+        self.hold_lock(CONV_A)
+        self.assertEqual(watch.presence_conversation(os.getpid()), CONV_A)
+
+    def test_presence_conversation_needs_exactly_one_lock(self):
+        lock = "/h/.gemini/antigravity-cli/presence/%s.lock"
+        cases = [
+            ([lock % CONV_A, "/h/x.db", lock % CONV_A], CONV_A),
+            ([lock % CONV_A, lock % CONV_B], None),
+            (["/h/conversations/%s.db" % CONV_A], None),
+            ([lock % "not-a-uuid", "/h/presence/%s.lock.tmp" % CONV_A], None),
+            ([], None),
+        ]
+        for paths, want in cases:
+            self.assertEqual(watch.presence_conversation(1, paths=lambda pid: paths), want, paths)
+
+    def test_find_agy_pid_walks_up_to_agy(self):
+        tree = {300: (200, "python3.15"), 200: (100, "sh"), 100: (50, "agy"), 50: (1, "zsh")}
+        self.assertEqual(watch.find_agy_pid(300, tree.get), 100)
+        self.assertIsNone(watch.find_agy_pid(200, {200: (1, "sh")}.get))
+        self.assertIsNone(watch.find_agy_pid(300, {}.get))
+        deep = {n: (n - 1, "sh") for n in range(2, 40)}
+        self.assertIsNone(watch.find_agy_pid(39, deep.get))
+
+    def test_watcher_agy_pid_override(self):
+        never = lambda pid: self.fail("searched despite TANDEM_AGY_PID")
+        self.assertIsNone(watch.watcher_agy_pid({"TANDEM_AGY_PID": ""}, never))
+        self.assertEqual(watch.watcher_agy_pid({"TANDEM_AGY_PID": "4242"}, never), 4242)
+        self.assertIsNone(watch.watcher_agy_pid({"TANDEM_AGY_PID": "x"}, never))
+        self.assertIsNone(watch.watcher_agy_pid({}, lambda pid: (1, "sh")))
+
+    def test_parent_and_name_reads_this_process(self):
+        self.assertEqual(watch.parent_and_name(os.getpid())[0], os.getppid())
+
+
 class FailureTest(AgyWatchTestCase):
     def test_failed_send_is_not_marked_rung_and_is_retried(self):
         self.set_conversation("conv-1")

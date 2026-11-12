@@ -44,7 +44,8 @@ docs/plans/                implementation plans; docs/backlog/ deferred work
 Conventions:
 
 - Subclass `tests.helpers.TandemTestCase`. It gives each test a temp `HOME` and `TANDEM_HOME`,
-  clears `TANDEM_SESSION`/`TANDEM_ROLE` and every `ANTIGRAVITY_*` variable, and isolates git from
+  clears `TANDEM_SESSION`/`TANDEM_ROLE` and every `ANTIGRAVITY_*` variable, sets `TANDEM_AGY_PID` empty (so a
+  detached watcher never looks for a real agy above a suite run from an agy pane), and isolates git from
   the user's config. `make_repo()` builds a fixture repo; `run_cli()` runs in-process, `run_shim()`
   runs the shim under the interpreter running the suite. Shared helpers live there too
   (`events`, `mark_ended`, `dead_pid`, `wait_for`, `FakeExec`); add one there rather than copying it
@@ -94,7 +95,8 @@ Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status
 - `log.jsonl` (`tandem log`) holds the `agy_profile` event with the self-check's verdict.
 - `$TANDEM_HOME/agy-check.json` caches the agy self-check per `agy --version`; delete it to force a
   re-run. Add a version to `VERIFIED_AGY_VERSIONS` only after re-running the README's live probe
-  on it.
+  on it. From `UNSANDBOXED_REMOVED_IN` (1.5.6) on, the navigator gets the fallback profile and no
+  check runs (and nothing is cached).
 
 ## Rules
 

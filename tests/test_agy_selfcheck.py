@@ -249,14 +249,38 @@ class SelfCheckTest(AgyLaunchTestCase):
             self.assertEqual(len(self.config_calls()), before + 1, text)
 
     def test_unverified_version_warns_and_keeps_navigator(self):
-        os.environ["FAKE_AGY_VERSION"] = "1.6.0"
+        os.environ["FAKE_AGY_VERSION"] = "1.5.3"
         for _ in range(2):
             _, _, _, err = self.launched("agy")
             self.assertEqual(self.profile()["toolPermission"], "proceed-in-sandbox")
             self.assertEqual(len(err.strip().splitlines()), 1, err)
-            self.assertIn("unverified on agy 1.6.0", err)
+            self.assertIn("unverified on agy 1.5.3", err)
             self.assertIn("--profile fallback", err)
         self.assertEqual(len(self.config_calls()), 1)
+
+    def test_agy_without_unsandboxed_rules_gets_fallback_without_check(self):
+        for version in ("1.5.6", "agy 1.6.0", "2.0"):
+            os.environ["FAKE_AGY_VERSION"] = version
+            _, _, _, err = self.launched("agy")
+            self.assertEqual(self.profile()["toolPermission"], "request-review", version)
+            self.assertFalse(self.profile()["enableTerminalSandbox"], version)
+            self.assertEqual(len(err.strip().splitlines()), 1, err)
+            self.assertIn("has no `unsandboxed(...)` rules", err)
+            self.assertIn("fallback profile", err)
+            event = self.events("agy_profile")[-1]
+            self.assertEqual((event["profile"], event["version"]), ("fallback", version))
+            self.assertEqual(event["check"], "no unsandboxed rules in this agy")
+        self.assertEqual(self.config_calls(), [])
+        self.assertFalse(os.path.exists(launch_agy.check_path()))
+
+    def test_has_unsandboxed_rules(self):
+        for version in ("1.5.4", "1.5.5", "agy 1.5.5", "1.4.9", "1.5"):
+            self.assertTrue(launch_agy.has_unsandboxed_rules(version), version)
+        for version in ("1.5.6", "1.5.10", "1.6.0", "agy 2.0"):
+            self.assertFalse(launch_agy.has_unsandboxed_rules(version), version)
+        # An unreadable version keeps the self-check path rather than guessing.
+        for version in ("", None, "1.5.6-beta", "agy"):
+            self.assertTrue(launch_agy.has_unsandboxed_rules(version), version)
 
     def test_is_verified(self):
         self.assertTrue(launch_agy.is_verified("1.5.4"))
@@ -309,7 +333,7 @@ class ArgvEnvTest(AgyLaunchTestCase):
 
     def test_driver_argv_and_no_check(self):
         argv, env, _, err = self.launched("agy", "--role", "driver")
-        self.assertEqual(argv[5:7], ["--mode", "auto"])
+        self.assertEqual(argv[5:7], ["--mode", "accept-edits"])
         self.assertTrue(argv[7].startswith("--prompt-interactive=tandem:"))
         self.assertIn("`tandem watch --as driver --detach`", argv[7])
         self.assertIn("intake", argv[7])

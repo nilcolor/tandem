@@ -145,6 +145,22 @@ class SkippedPromptTest(ClaudePromptTestCase):
         self.hook(payload("tandem status says nothing"))
         self.assertEqual(len(self.consoles()), 3)
 
+    def test_rewake_notification_skipped(self):
+        # As Claude 2.1.322 delivered an asyncRewake doorbell to UserPromptSubmit (Task 17 live run).
+        wake = (
+            "<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n"
+            "<system-reminder>\nStop hook blocking error from command \"Stop\": "
+            "tandem doorbell: new mail for driver. Run `tandem recv`.\n\n</system-reminder>"
+        )
+        self.assert_quiet(self.hook(payload(wake)))
+        self.assertEqual(self.consoles(), [])
+        self.assertEqual(self.hooks_log(), "")
+
+    def test_other_notifications_and_doorbell_mentions_logged(self):
+        self.hook(payload("<task-notification>\n<summary>Background task finished</summary>\n</task-notification>"))
+        self.hook(payload("why did tandem doorbell: new mail for driver not wake you?"))
+        self.assertEqual(len(self.consoles()), 2)
+
     def test_empty_and_blank_prompts_skipped(self):
         for text in ("", "   ", "\n\t\n"):
             self.assert_quiet(self.hook(payload(text)))

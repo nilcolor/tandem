@@ -15,6 +15,7 @@ ERROR_CAP = 500
 ASK = {"decision": "ask"}
 BYPASS = {"decision": "allow", "overwrite": {"BypassSandbox": True}}
 NOOP = {}
+REWAKE_PREFIX = "<task-notification>"
 # A watcher that fails to start would otherwise make every idle Stop re-enter
 # the loop to retry it.
 WATCHDOG_BACKOFF = 60.0
@@ -95,13 +96,19 @@ def log_console(meta, peer, body):
     return True
 
 
+def _is_rewake(prompt):
+    # An asyncRewake wake reaches UserPromptSubmit as a <task-notification> block with the Stop
+    # hook's stderr (the doorbell) in a <system-reminder>; it isn't the user typing (Task 17).
+    return prompt.lstrip().startswith(REWAKE_PREFIX) and watch.DOORBELL_PREFIX in prompt
+
+
 def claude_prompt(meta, payload):
     """UserPromptSubmit: log what the user typed. Prints nothing, since this hook's stdout
     would be added to the model's context."""
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         raise HookInputError("no prompt string in stdin")
-    if not prompt.strip() or prompt.startswith(protocol.LAUNCHER_PREFIX):
+    if not prompt.strip() or prompt.startswith(protocol.LAUNCHER_PREFIX) or _is_rewake(prompt):
         return None
     log_console(meta, "claude", prompt)
     return None
@@ -164,7 +171,6 @@ def agy_pretool(meta, payload):
 
     Never returns `{}`, which agy reads as deny.
     """
-    sdir = session.session_path(meta["dir"])
     call = payload.get("toolCall")
     if not isinstance(call, dict):
         raise HookInputError("no toolCall object in stdin")
@@ -174,6 +180,7 @@ def agy_pretool(meta, payload):
     command = args.get("CommandLine") if isinstance(args, dict) else None
     if not isinstance(command, str):
         raise HookInputError("run_command without a CommandLine string")
+    sdir = session.session_path(meta["dir"])
     role = session.role_of(meta, "agy")
     if cmdline.bypass_prefix(command, protocol.approved_prefixes(meta, role)) is not None:
         return BYPASS if sandboxed(sdir) else ASK

@@ -24,6 +24,11 @@ def rules(kind, prefixes):
     return ["%s(%s)" % (kind, p) for p in prefixes]
 
 
+def read_git(repo):
+    subs = ["status", "diff", "log", "show"]
+    return ["git " + s for s in subs] + ["git -C %s %s" % (repo, s) for s in subs]
+
+
 def pretool_payload(command):
     return json.dumps(
         {
@@ -216,11 +221,15 @@ class ProfileTest(AgyFilesTestCase):
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
-                    "allow": rules("command", NAV_TANDEM + ["go test", "git status", "git diff", "git log", "git show"]),
+                    "allow": rules("command", NAV_TANDEM + ["go test"] + read_git(self.meta["repo"])),
                     "deny": ["write_file(*)"],
                 },
             },
         )
+
+    def test_read_only_git_skips_dash_c_for_paren_paths(self):
+        self.assertEqual(launch_agy.read_only_git("/w/a(b)"), ["git status", "git diff", "git log", "git show"])
+        self.assertIn("git -C /w/ab diff", launch_agy.read_only_git("/w/ab"))
 
     def test_driver(self):
         self.assertEqual(
@@ -228,9 +237,17 @@ class ProfileTest(AgyFilesTestCase):
             {
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
-                "permissions": {"allow": rules("command", DRIVER_TANDEM + ["go test", "git"]), "deny": []},
+                "permissions": {
+                    "allow": rules("command", DRIVER_TANDEM + ["go test", "git"])
+                    + rules("write_file", [os.path.join(self.sdir, n) for n in ("plan.md", "decisions.md")]),
+                    "deny": [],
+                },
             },
         )
+
+    def test_session_file_writes_skip_paren_paths(self):
+        meta = dict(self.meta, dir="odd(dir)")
+        self.assertEqual(launch_agy.session_file_writes(meta), [])
 
     def test_no_bare_tandem_rule(self):
         # A bare `tandem` rule would pre-approve `tandem claude`, `init --replace` and `done`.
@@ -249,9 +266,11 @@ class ProfileTest(AgyFilesTestCase):
     def test_rule_kinds_do_not_mix(self):
         nav = launch_agy.build_profile(self.meta, "navigator")["permissions"]["allow"]
         self.assertTrue(all(r.startswith("unsandboxed(") for r in nav))
-        for kind in ("fallback", "driver"):
-            allow = launch_agy.build_profile(self.meta, kind)["permissions"]["allow"]
-            self.assertTrue(all(r.startswith("command(") for r in allow), kind)
+        fallback = launch_agy.build_profile(self.meta, "fallback")["permissions"]["allow"]
+        self.assertTrue(all(r.startswith("command(") for r in fallback))
+        driver = launch_agy.build_profile(self.meta, "driver")["permissions"]["allow"]
+        self.assertTrue(all(r.startswith(("command(", "write_file(")) for r in driver))
+        self.assertEqual(len([r for r in driver if r.startswith("write_file(")]), 2)
 
     def test_default_path(self):
         path = launch_agy.write_profile(self.meta, "navigator")
@@ -389,7 +408,7 @@ class TestPrefixFlowTest(AgyFilesTestCase):
         self.assertEqual(launch_agy.build_profile(meta, "navigator")["permissions"]["allow"], rules("unsandboxed", NAV_TANDEM))
         self.assertEqual(
             launch_agy.build_profile(meta, "fallback")["permissions"]["allow"],
-            rules("command", NAV_TANDEM + ["git status", "git diff", "git log", "git show"]),
+            rules("command", NAV_TANDEM + read_git(meta["repo"])),
         )
 
     def test_prefix_normalisation(self):

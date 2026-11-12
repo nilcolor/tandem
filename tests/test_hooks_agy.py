@@ -242,6 +242,12 @@ class PretoolProfileTest(AgyHookTestCase):
             self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
         self.assertEqual(self.out("agy-pretool", pretool("touch x"))["decision"], "force_ask")
         self.assertEqual(self.out("agy-pretool", pretool("tandem done"))["decision"], "force_ask")
+        # The protocol's `cd <repo> && <command>` form: agy's rules approve each part, the gate
+        # still sees a write behind the `cd`.
+        cd = "cd %s && " % self.meta["repo"]
+        self.assertEqual(self.out("agy-pretool", pretool(cd + "go test ./...")), ASK)
+        self.assertEqual(self.out("agy-pretool", pretool(cd + "git diff")), ASK)
+        self.assertEqual(self.out("agy-pretool", pretool(cd + "touch x"))["decision"], "force_ask")
 
     def test_driver_profile_never_forces_a_bypass(self):
         self.update(roles={"driver": "agy", "navigator": "claude"})

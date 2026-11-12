@@ -127,6 +127,7 @@ def values(meta, peer, role):
     return {
         "session": session.display_name(meta),
         "session_dir": sdir,
+        "repo": meta["repo"],
         "role": role,
         "peer": PEERS[peer],
         "other_role": other,

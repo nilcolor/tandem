@@ -69,6 +69,14 @@ class RenderTest(ProtocolTestCase):
                 self.assertIn("You are the **%s**" % role, text)
                 self.assertClean(text)
 
+    def test_repo_named_for_every_peer_and_agy_told_to_cd_there(self):
+        for role, peer in COMBOS:
+            with self.subTest(role=role, peer=peer):
+                text = protocol.render(self.meta_for(role, peer), peer)
+                self.assertIn("- Repo: `%s`. Run commands there." % self.meta["repo"], text)
+                told = "as `cd %s && <command>`" % self.meta["repo"]
+                self.assertEqual(told in text, peer == "agy")
+
     def test_size_under_limit(self):
         for role, peer in COMBOS:
             with self.subTest(role=role, peer=peer):

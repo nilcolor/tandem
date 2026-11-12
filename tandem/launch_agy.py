@@ -12,10 +12,18 @@ PEER = "agy"
 RULES_CAP = 24 * 1024
 READ_ONLY_GIT = ["git status", "git diff", "git log", "git show"]
 DENY_FILE_TOOL = ["write_file(*)"]
+SESSION_FILES = ("plan.md", "decisions.md")
+# `--mode auto` needs the terminal sandbox, which the driver profile turns off, and agy then
+# falls back to the default mode silently ("auto mode is unavailable", agy 1.5.6 log, Task 17).
+DRIVER_MODE = "accept-edits"
 # The user's own agy settings, read for their deny rules and never written.
 USER_SETTINGS = os.path.join("~", ".gemini", "antigravity-cli", "settings.json")
 # Versions where a live session confirmed `unsandboxed(...)` bypasses selectively (README probes).
 VERIFIED_AGY_VERSIONS = frozenset(["1.5.4", "1.5.5"])
+# 1.5.6 dropped `unsandboxed(...)` rules and asks before every sandbox bypass, so the sandboxed
+# profile would prompt on each tandem command; `/config` still echoes the rules, so the
+# self-check can't see it (README `agy 1.5.6`).
+UNSANDBOXED_REMOVED_IN = (1, 5, 6)
 CHECK_TIMEOUT = 30
 # The 1.5.5 TUI notice for rules agy refuses (README `agy 1.5.5 re-check`).
 UNSUPPORTED_MARKERS = ('Invalid "unsandboxed" permission rules', "unsandboxed is no longer a valid rule")
@@ -71,6 +79,32 @@ def profile_kind(role, fallback=False):
     return "fallback" if fallback else "navigator"
 
 
+def read_only_git(repo):
+    """The navigator's read-only git prefixes, plus their `git -C <repo>` forms.
+
+    agy reaches for `git -C <absolute repo> diff` on its own, and a rule matches the command text,
+    so without these the fallback navigator asks before every such read (Task 17 on 1.5.6). A
+    path holding `(` or `)` would end the rule early, so it gets only the plain forms.
+    """
+    forms = list(READ_ONLY_GIT)
+    if "(" not in repo and ")" not in repo:
+        forms += ["git -C %s%s" % (repo, cmd[len("git"):]) for cmd in READ_ONLY_GIT]
+    return forms
+
+
+def session_file_writes(meta):
+    """`write_file(...)` rules for the two session files the driver owns.
+
+    They sit outside the workspace, where `accept-edits` asks before each write; agy 1.5.6 honours
+    allowlisted `write_file` rules instead (Task 17). A path holding `(` or `)` would end the rule
+    early, so it gets none and the driver is asked.
+    """
+    sdir = session.session_path(meta["dir"])
+    if "(" in sdir or ")" in sdir:
+        return []
+    return ["write_file(%s)" % os.path.join(sdir, name) for name in SESSION_FILES]
+
+
 def build_profile(meta, kind):
     """The `--settings` profile for `kind`: "navigator", "fallback" or "driver".
 
@@ -85,8 +119,10 @@ def build_profile(meta, kind):
         allow, deny = ["unsandboxed(%s)" % p for p in prefixes], list(DENY_FILE_TOOL)
     else:
         settings = {"toolPermission": "request-review", "enableTerminalSandbox": False}
-        extra = ["git"] if kind == "driver" else READ_ONLY_GIT
+        extra = ["git"] if kind == "driver" else read_only_git(meta["repo"])
         allow = ["command(%s)" % p for p in dict.fromkeys(prefixes + extra)]
+        if kind == "driver":
+            allow += session_file_writes(meta)
         deny = [] if kind == "driver" else list(DENY_FILE_TOOL)
     settings["permissions"] = {"allow": allow, "deny": list(dict.fromkeys(deny + user_deny()))}
     return settings
@@ -163,6 +199,20 @@ def is_verified(version):
     return bool(words) and words[-1] in VERIFIED_AGY_VERSIONS
 
 
+def version_number(version):
+    """`agy --version`'s last word as a tuple of ints, or None when it isn't one."""
+    words = (version or "").split()
+    try:
+        return tuple(int(part) for part in words[-1].split("."))
+    except (IndexError, ValueError):
+        return None
+
+
+def has_unsandboxed_rules(version):
+    number = version_number(version)
+    return number is None or number < UNSANDBOXED_REMOVED_IN
+
+
 def parse_check(profile, result):
     """(why `profile` didn't load as written or None, whether that answer holds for this version).
 
@@ -208,15 +258,14 @@ def read_check(version):
     return None
 
 
-def self_check(meta):
-    """Whether this agy loads the navigator profile as written; returns the check record.
+def self_check(meta, version):
+    """Whether this agy (`version`, from agy_version) loads the navigator profile as written.
 
-    `/config` echoes rule strings without validating them, so this proves only that the
-    profile parses and its rules survive loading. Whether `unsandboxed(...)` still bypasses
-    is known only for VERIFIED_AGY_VERSIONS. A definitive result is cached per `agy --version`
-    (the record then has `cached: true`).
+    Returns the check record. `/config` echoes rule strings without validating them, so this
+    proves only that the profile parses and its rules survive loading. Whether
+    `unsandboxed(...)` still bypasses is known only for VERIFIED_AGY_VERSIONS. A definitive
+    result is cached per `agy --version` (the record then has `cached: true`).
     """
-    version = agy_version()
     if version is None:
         return {"version": None, "ok": False, "reason": "agy --version gave no answer"}
     cached = read_check(version)
@@ -242,7 +291,15 @@ def choose_fallback(meta, profile):
     """(use the fallback profile?, check record or None) for a navigator; prints why when unsure."""
     if profile == "fallback":
         return True, None
-    check = self_check(meta)
+    version = agy_version()
+    if not has_unsandboxed_rules(version):
+        print(
+            "tandem: agy %s has no `unsandboxed(...)` rules, so the sandboxed profile would ask before every "
+            "tandem command; using the fallback profile (no sandbox, tight allowlist)" % version,
+            file=sys.stderr,
+        )
+        return True, {"version": version, "ok": False, "reason": "no unsandboxed rules in this agy"}
+    check = self_check(meta, version)
     if not check["ok"]:
         how = " (cached; delete %s to re-run the check)" % check_path() if check.get("cached") else ""
         print(
@@ -289,7 +346,7 @@ def prepare(meta, role=None, profile="auto", extra=()):
     argv = ["agy", "--settings", profile_path(sdir), "--add-dir", sdir]
     # Driver mode doesn't show in `/config`; only a live session confirms it took.
     if kind == "driver":
-        argv += ["--mode", "auto"]
+        argv += ["--mode", DRIVER_MODE]
     argv.append("--prompt-interactive=%s" % initial_prompt(meta, role))
     argv += list(extra)
     return argv, session.harness_env(meta, role), meta["repo"]
@@ -301,8 +358,8 @@ def configure_agy(p):
         "--profile",
         choices=PROFILE_CHOICES,
         default="auto",
-        help="navigator profile: auto runs the self-check and uses the sandbox profile if it passes; "
-        "fallback skips the sandbox (default: auto)",
+        help="navigator profile: auto runs the self-check and uses the sandbox profile if it passes "
+        "(agy 1.5.6 and later always get fallback); fallback skips the sandbox (default: auto)",
     )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="after --: arguments passed to agy as they are")
 
