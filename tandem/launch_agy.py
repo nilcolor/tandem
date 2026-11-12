@@ -14,18 +14,19 @@ READ_ONLY_GIT = ["git status", "git diff", "git log", "git show"]
 DENY_FILE_TOOL = ["write_file(*)"]
 SESSION_FILES = ("plan.md", "decisions.md")
 # `--mode auto` needs the terminal sandbox, which the driver profile turns off, and agy then
-# falls back to the default mode silently ("auto mode is unavailable", agy 1.5.6 log, Task 17).
+# falls back to the default mode silently ("auto mode is unavailable" in agy 1.5.6's log;
+# docs/probes 2026-11-12 live check).
 DRIVER_MODE = "accept-edits"
 # The user's own agy settings, read for their deny rules and never written.
 USER_SETTINGS = os.path.join("~", ".gemini", "antigravity-cli", "settings.json")
-# Versions where a live session confirmed `unsandboxed(...)` bypasses selectively (README probes).
+# Versions where a live session confirmed `unsandboxed(...)` bypasses selectively (docs/probes).
 VERIFIED_AGY_VERSIONS = frozenset(["1.5.4", "1.5.5"])
 # 1.5.6 dropped `unsandboxed(...)` rules and asks before every sandbox bypass, so the sandboxed
 # profile would prompt on each tandem command; `/config` still echoes the rules, so the
-# self-check can't see it (README `agy 1.5.6`).
+# self-check can't see it (docs/probes 2026-11-12 live check).
 UNSANDBOXED_REMOVED_IN = (1, 5, 6)
 CHECK_TIMEOUT = 30
-# The 1.5.5 TUI notice for rules agy refuses (README `agy 1.5.5 re-check`).
+# The 1.5.5 TUI notice for rules agy refuses (docs/probes 2026-11-11 agy 1.5.5 re-check).
 UNSUPPORTED_MARKERS = ('Invalid "unsandboxed" permission rules', "unsandboxed is no longer a valid rule")
 PROFILE_CHOICES = ("auto", "fallback")
 
@@ -83,8 +84,8 @@ def read_only_git(repo):
     """The navigator's read-only git prefixes, plus their `git -C <repo>` forms.
 
     agy reaches for `git -C <absolute repo> diff` on its own, and a rule matches the command text,
-    so without these the fallback navigator asks before every such read (Task 17 on 1.5.6). A
-    path holding `(` or `)` would end the rule early, so it gets only the plain forms.
+    so without these the fallback navigator asks before every such read (docs/probes 2026-11-12
+    live check). A path holding `(` or `)` would end the rule early, so it gets only the plain forms.
     """
     forms = list(READ_ONLY_GIT)
     if "(" not in repo and ")" not in repo:
@@ -96,8 +97,8 @@ def session_file_writes(meta):
     """`write_file(...)` rules for the two session files the driver owns.
 
     They sit outside the workspace, where `accept-edits` asks before each write; agy 1.5.6 honours
-    allowlisted `write_file` rules instead (Task 17). A path holding `(` or `)` would end the rule
-    early, so it gets none and the driver is asked.
+    allowlisted `write_file` rules instead (docs/probes 2026-11-12 live check). A path holding `(`
+    or `)` would end the rule early, so it gets none and the driver is asked.
     """
     sdir = session.session_path(meta["dir"])
     if "(" in sdir or ")" in sdir:

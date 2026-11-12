@@ -25,7 +25,7 @@ DOORBELL_PREFIX = "tandem doorbell"
 # One line of agentapi's output is enough for watch.log; its full error can be a page.
 ERROR_LINE_CAP = 200
 # agy holds `~/.gemini/antigravity-cli/presence/<conversation>.lock` open for the conversation
-# it shows, and moves it on `/new`, which fires no hook (Task 17 live run, agy 1.5.6).
+# it shows, and moves it on `/new`, which fires no hook (docs/probes 2026-11-12 live check).
 PRESENCE_LOCK = re.compile(r"/presence/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.lock\Z")
 ANCESTOR_DEPTH = 8
 PS_TIMEOUT = 5.0
@@ -153,8 +153,8 @@ def agy_ls_address(environ):
 def parse_ls_address(address):
     """(host, port) from `host:port`, `[v6]:port` or a URL such as `http://host:port/`; None if neither.
 
-    The exact form agy uses is unverified (plan Task 17), so an optional scheme and path are
-    accepted rather than read as a dead language server.
+    agy 1.5.6 gives `localhost:<port>` (docs/probes 2026-11-12 live check); the other forms are accepted
+    so a change in a later agy reads as an address, not as a dead language server.
     """
     text = address.strip()
     if "://" in text:

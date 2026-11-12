@@ -426,7 +426,7 @@ class EdgeCaseTest(AcceptanceTestCase):
 
     def test_agy_new_conversation_gets_the_next_ring(self):
         self.setup_pair()
-        # README (verified): after `/new` no hook runs until the user's first message, so a ring
+        # docs/probes (agy 1.5.4): after `/new` no hook runs until the user's first message, so a ring
         # in that window still goes to the old conversation.
         self.ok("tandem send --to navigator --type plan 'Plan'", self.claude_env)
         self.wait_for(lambda: len(self.calls()) == 1)

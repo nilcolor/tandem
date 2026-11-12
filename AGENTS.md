@@ -1,8 +1,9 @@
 # Working on tandem
 
-For contributors and agents changing tandem itself. `README.md` is the decision record: what tandem
-does, why, what was rejected, and the probe results the design rests on. Read it before changing
-behaviour, and update it in the same change when a decision moves.
+For contributors and agents changing tandem itself. `README.md` is the user guide (install, usage,
+every option). `docs/design.md` is the decision record: what tandem does, why, and what was
+rejected. `docs/probes/` holds the dated probe results the design rests on, one file per probe. Read
+the design before changing behaviour, and update it in the same change when a decision moves.
 
 ## Layout
 
@@ -30,6 +31,8 @@ tandem/launch_claude.py    `tandem claude`: settings.json, protocol, argv/env, e
 tandem/launch_agy.py       `tandem agy`: hooks.json, rules, profiles, user deny carry-over, self-check
 tandem/human.py            `tandem human` REPL
 tests/                     unittest suite, one file per area; tests/helpers.py holds the fixture
+docs/design.md             the decision record
+docs/probes/               dated harness probes and live checks, one file each (index in README.md)
 docs/plans/                implementation plans; docs/backlog/ deferred work
 ```
 
@@ -94,16 +97,20 @@ Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status
   reads its `enableTerminalSandbox` to decide whether to force a bypass.
 - `log.jsonl` (`tandem log`) holds the `agy_profile` event with the self-check's verdict.
 - `$TANDEM_HOME/agy-check.json` caches the agy self-check per `agy --version`; delete it to force a
-  re-run. Add a version to `VERIFIED_AGY_VERSIONS` only after re-running the README's live probe
-  on it. From `UNSANDBOXED_REMOVED_IN` (1.5.6) on, the navigator gets the fallback profile and no
-  check runs (and nothing is cached).
+  re-run. Add a version to `VERIFIED_AGY_VERSIONS` only after re-running the live probe on it and
+  recording it as a new file in `docs/probes/`. From `UNSANDBOXED_REMOVED_IN` (1.5.6) on, the
+  navigator gets the fallback profile and no check runs (and nothing is cached).
 
 ## Rules
 
 - Comments justify decisions (why a value, why a workaround, why not the obvious option). They
-  never narrate code. Context that doesn't fit a comment belongs here or in README.md.
+  never narrate code. Context that doesn't fit a comment belongs here or in `docs/design.md`.
 - Deferred work goes to `docs/backlog/<slug>.md`, one file per item (frontmatter `worth`, then
   `where` when it points at code, as `path (symbol)`, then `added`; H1 title; why it was deferred). `git rm` it in the change
   that lands it.
-- README.md must match the code: when behaviour changes, fix every line it contradicts. Probe
-  records and rejected alternatives stay, labelled as history.
+- `README.md` and `docs/design.md` must match the code: when behaviour changes, fix every line
+  either contradicts (a new option or default changes the README's command tables too). Rejected
+  alternatives stay in the design, labelled as such.
+- A probe or live check gets a new `docs/probes/<date>-<subject>.md` and a row in its index. Probe
+  files are history: don't rewrite one when a later version changes things; add a pointer to the
+  newer probe instead.

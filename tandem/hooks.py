@@ -98,7 +98,8 @@ def log_console(meta, peer, body):
 
 def _is_rewake(prompt):
     # An asyncRewake wake reaches UserPromptSubmit as a <task-notification> block with the Stop
-    # hook's stderr (the doorbell) in a <system-reminder>; it isn't the user typing (Task 17).
+    # hook's stderr (the doorbell) in a <system-reminder>; it isn't the user typing (docs/probes
+    # 2026-11-12 live check).
     return prompt.lstrip().startswith(REWAKE_PREFIX) and watch.DOORBELL_PREFIX in prompt
 
 
