@@ -180,7 +180,9 @@ panes: the user runs each launcher in whatever terminal they like.
   the harness. `--role` taking the other peer's role swaps the two in `roles`, unless that peer has a
   live claim (then it's an error: quit it first). A dead claim is released, so relaunching after a
   crash never deadlocks. A second launcher for the same peer isn't refused yet
-  (`docs/backlog/second-launcher-for-same-peer-not-refused.md`).
+  (`docs/backlog/second-launcher-for-same-peer-not-refused.md`). A pair is one Claude and one agy:
+  claims and peer dirs are keyed by peer, so two of the same harness collide
+  (`docs/backlog/same-harness-pair.md`).
 - Launchers export `TANDEM_SESSION` and `TANDEM_ROLE`, so hooks and `tandem send/recv` know who they
   are without flags, and `cd` to the repo's toplevel before `exec`.
 - **Protocol parity.** Both peers get the doorbell protocol and role rules from launch-time,
