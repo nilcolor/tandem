@@ -14,3 +14,4 @@ protocol names, the user watches its console, and the driver's `git status` chec
 checkpoint catches a stray file in the tree. The fix is a per-tool list of host-unsafe options
 (`-exec`, `-toolexec`, `-o`, `-coverprofile`, `-cpuprofile`, ...) that the pretool hook turns into a
 `force_ask`; revisit if live sessions show a navigator reaching for them.
+rubocop already has this (`_rubocop_writes` in `tandem/cmdline.py`), as the model for the rest.

@@ -264,6 +264,39 @@ class WriteGateTest(TandemTestCase):
         self.assertEqual(self.reason("find . -name x -exec rm {} ;"), "find")
         self.assertIsNone(self.reason("find . -name '*.go' -exec grep -l x {} +"))
 
+    def test_rubocop_writes(self):
+        for text, opt in (
+            ("rubocop -a", "-a"),
+            ("rubocop -A app", "-A"),
+            ("bin/rubocop -x", "-x"),
+            ("rubocop -Da app", "-a"),
+            ("rubocop --autocorrect-all", "--autocorrect-all"),
+            ("rubocop --auto-correct", "--auto-correct"),
+            ("rubocop --auto-gen-config", "--auto-gen-config"),
+            ("rubocop --out=report.txt", "--out"),
+            ("rubocop -o report.txt", "-o"),
+            ("dip rubocop -A app/models", "-A"),
+            ("dip run rubocop -a", "-a"),
+            ("bundle exec rubocop --autocorrect", "--autocorrect"),
+            ("bundle exec bin/rubocop -a", "-a"),
+            ("cd /repo && dip rubocop app/a.rb -a", "-a"),
+        ):
+            self.assertEqual(self.reason(text), "rubocop " + opt, text)
+
+    def test_rubocop_reads(self):
+        for text in (
+            "rubocop",
+            "dip rubocop app/a.rb spec/a_spec.rb",
+            "bundle exec rubocop -D --format simple",
+            "rubocop -c .rubocop.yml app",
+            "rubocop --only Style/Foo",
+            "rubocop -- -a",
+            "grep -rn rubocop -A 3 .",
+            "dip rspec -a",
+            "bundle exec rspec spec/rubocop_spec.rb -o x",
+        ):
+            self.assertIsNone(self.reason(text), text)
+
     def test_reads_pass(self):
         for text in ("ls -la", "cat README.md", "grep -rn foo .", "go vet ./...", "python3 -c 'print(1)'", "", "   "):
             self.assertIsNone(self.reason(text), text)

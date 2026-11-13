@@ -86,7 +86,7 @@ tandem init [name] [--ticket KEY] [--task TEXT | --task-file FILE] [--test-cmd C
 | `--ticket KEY` | Ticket the task comes from. The driver starts intake from it. |
 | `--task TEXT` | The task brief, inline. |
 | `--task-file FILE` | The task brief, read from a file. |
-| `--test-cmd CMD` | The command that runs the tests (repeatable). Both agents may run it without asking. Default: detected from the repo: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec`. Giving any `--test-cmd` replaces detection. |
+| `--test-cmd CMD` | The command that runs the tests (repeatable). Both agents may run it without asking. Default: detected from the repo: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec`, and with either Ruby marker a `.rubocop.yml` adds `dip rubocop` or `bundle exec rubocop`. Giving any `--test-cmd` replaces detection. |
 | `--replace` | End this repo's active session (without a summary) and start a new one. Run `tandem done` first if you want its summary. |
 
 - A repo (more exactly, a checkout) has one active session at a time. Separate git worktrees get

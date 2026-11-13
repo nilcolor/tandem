@@ -18,10 +18,7 @@ DEFAULT_BRANCHES = ("main", "master")
 SUBJECT_CAP = 100
 
 # Order matters: it is the order the prefixes appear in profiles and prompts.
-TEST_PREFIXES = (
-    ("go.mod", "go test"),
-    ("dip.yml", "dip rspec"),
-)
+TEST_PREFIXES = (("go.mod", "go test"),)
 
 
 def seconds(text, flag, positive=False):
@@ -101,9 +98,15 @@ def derive_name(top, name=None, ticket=None):
 
 
 def detect_test_cmds(top):
-    found = [cmd for marker, cmd in TEST_PREFIXES if os.path.exists(os.path.join(top, marker))]
-    if os.path.exists(os.path.join(top, "Gemfile")) and not os.path.exists(os.path.join(top, "dip.yml")):
-        found.append("bundle exec rspec")
+    def has(name):
+        return os.path.exists(os.path.join(top, name))
+
+    found = [cmd for marker, cmd in TEST_PREFIXES if has(marker)]
+    ruby = "dip" if has("dip.yml") else "bundle exec" if has("Gemfile") else None
+    if ruby:
+        found.append(ruby + " rspec")
+        if has(".rubocop.yml"):
+            found.append(ruby + " rubocop")
     return found
 
 

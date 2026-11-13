@@ -343,7 +343,9 @@ settings say, so the allowlist decides what runs unasked.
   `>`/`>>`, `tee`, `touch`, `rm`, `mv`, `cp`, `mkdir`, `ln`, `chmod`, `sed -i`, `perl -i`,
   `truncate`, `dd`, `git` subcommands that change the tree or refs such as `commit`, `checkout`,
   `reset`, `restore`, `stash`, `apply`, `merge`, `rebase`, `clean`, `add`, `push`, `config`,
-  `remote`), or a tandem subcommand outside the protocol's list (`claude`, `agy`, `init`, `done`,
+  `remote`), rubocop's autocorrect and file-writing options (`-a`, `-A`, `-x`, `-o`,
+  `--auto-gen-config`, run directly or through `dip`/`bundle exec`, since `dip rubocop` is an
+  allowed test command), or a tandem subcommand outside the protocol's list (`claude`, `agy`, `init`, `done`,
   `human`, `hook`) → `force_ask` with the reason `tandem write gate: …`. The command is read the
   way `sh` reads it, so a quoted message body is one literal argument and the words in it don't
   trip the gate, and every part is checked, including `$(…)`, backticks, subshells and each side of

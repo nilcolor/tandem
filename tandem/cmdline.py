@@ -70,6 +70,20 @@ _GIT_BRANCH_WRITES = frozenset(
     )
 )
 _GIT_BRANCH_LISTS = frozenset(("-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
+# rubocop runs as a test command, so its allow rule lets these through unless the gate catches
+# them: they rewrite the checked files, or write a todo config or a report file.
+_RUBOCOP_WRITE_OPTS = frozenset(
+    (
+        "--autocorrect", "--autocorrect-all", "--auto-correct", "--auto-correct-all",
+        "--safe-auto-correct", "--fix-layout", "--disable-uncorrectable", "--auto-gen-config",
+        "--regenerate-todo", "--out",
+    )
+)
+_RUBOCOP_WRITE_LETTERS = "aAxo"
+_RUBOCOP_VALUE_LETTERS = "cCfors"
+# How rubocop is reached through a runner: `dip rubocop`, `bundle exec rubocop`, `dip run rubocop`.
+_RUBY_RUNNERS = frozenset(("dip", "bundle", "bundler"))
+_RUNNER_WORDS = frozenset(("exec", "run", "bundle", "bundler"))
 _HARMLESS_TARGETS = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"))
 _WRITE_REDIRS = frozenset((">", ">>", ">|", "&>", "&>>", "<>"))
 
@@ -393,6 +407,37 @@ def _find_writes(args):
     return False
 
 
+def _rubocop_args(name, args):
+    """rubocop's arguments when this command runs it, directly or through a runner; else None.
+
+    Only runner words may come before it, so `grep rubocop -A 3 f` isn't rubocop.
+    """
+    if name == "rubocop":
+        return args
+    if name not in _RUBY_RUNNERS:
+        return None
+    for i, a in enumerate(args):
+        if os.path.basename(a) == "rubocop":
+            return args[i + 1 :]
+        if a not in _RUNNER_WORDS and not a.startswith("-"):
+            return None
+    return None
+
+
+def _rubocop_writes(args):
+    """The first rubocop option in `args` that writes files, or None."""
+    for a in args:
+        if a == "--":
+            return None
+        opt = a.split("=", 1)[0]
+        if opt in _RUBOCOP_WRITE_OPTS:
+            return opt
+        for letter in _RUBOCOP_WRITE_LETTERS:
+            if _short_flag_has(a, letter, _RUBOCOP_VALUE_LETTERS):
+                return "-" + letter
+    return None
+
+
 def _redirect_writes(op, target):
     bare = op.lstrip("0123456789")
     if bare == ">&":
@@ -407,7 +452,8 @@ def write_reason(text):
 
     Looks at every simple command (including those in `$(...)`, backticks and
     subshells): a known writer, `sed -i`/`perl -i`, a tree- or ref-changing
-    git subcommand, `find -delete`/`-exec <writer>`, or an output redirect to
+    git subcommand, `find -delete`/`-exec <writer>`, rubocop's autocorrect and
+    file-writing options, or an output redirect to
     anything but /dev/null and friends.
     """
     try:
@@ -431,4 +477,9 @@ def write_reason(text):
             reason = _git_writes(args)
             if reason:
                 return reason
+        rubocop = _rubocop_args(name, args)
+        if rubocop is not None:
+            opt = _rubocop_writes(rubocop)
+            if opt:
+                return "rubocop " + opt
     return None

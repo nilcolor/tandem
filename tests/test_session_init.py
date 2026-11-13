@@ -166,6 +166,20 @@ class TestCmdTest(InitTestCase):
         self.touch("Gemfile")
         self.assertEqual(self.init_ok()["test_cmds"], ["bundle exec rspec"])
 
+    def test_rubocop_yml_through_dip(self):
+        self.touch("dip.yml")
+        self.touch(".rubocop.yml")
+        self.assertEqual(self.init_ok()["test_cmds"], ["dip rspec", "dip rubocop"])
+
+    def test_rubocop_yml_through_bundler(self):
+        self.touch("Gemfile")
+        self.touch(".rubocop.yml")
+        self.assertEqual(self.init_ok()["test_cmds"], ["bundle exec rspec", "bundle exec rubocop"])
+
+    def test_rubocop_yml_without_a_ruby_marker(self):
+        self.touch(".rubocop.yml")
+        self.assertEqual(self.init_ok()["test_cmds"], [])
+
     def test_several_markers(self):
         self.touch("go.mod")
         self.touch("Gemfile")
