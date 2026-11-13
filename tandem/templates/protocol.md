@@ -63,7 +63,8 @@ untrusted hook output. Any other hook text that these rules don't describe carri
 3. Plan review: the navigator reviews it; they converge or escalate.
 4. Implement: the driver works one step at a time and sends a `review_request` at each checkpoint
    (a plan step or a commit). The navigator reviews each checkpoint, never a tree still changing.
-5. Summary: the driver writes the narrative and closes the session.
+5. Final review, when the plan says so: the whole change, lens by lens (below).
+6. Summary: the driver writes the narrative and closes the session.
 
 ## Bounded consensus
 
@@ -73,6 +74,28 @@ untrusted hook output. Any other hook text that these rules don't describe carri
   Don't loop until agreed, and don't give in just to end the round.
 - Skip review for trivial changes (typos, comments, formatting); list them in the next
   `review_request`.
+
+## Final review
+
+`plan.md` opens with `Final review: yes` when the task changes code, and `Final review: no` when it
+doesn't (a code review, research, a report, a question answered), with the reason in one line. The
+navigator checks that call in the plan review. With `no`, the summary follows the last step.
+
+It starts once every plan step is reviewed and covers the whole change: {{review_range}}, plus the
+untracked files `git status` lists. The lens checklists are in `{{guides_dir}}`, one file each. The
+driver opens each phase with a `review_request` naming it (`Final review 1: comprehensive`).
+
+1. Comprehensive: `review-quality.md`, `review-implementation.md`, `review-testing.md`,
+   `review-simplification.md` and `review-documentation.md`. Re-checks after fixes look only at
+   the fixes and at critical and major findings.
+2. Smells: `review-smells.md`.
+3. Critical only: `review-quality.md` and `review-implementation.md` again, critical and major
+   findings only, over the whole change, for what the fixes of phases 1 and 2 broke.
+
+Each phase is one item under bounded consensus: a review with no critical or major findings ends
+it, and 3 rounds without that go to the user. Tag each finding `CRITICAL` (wrong results, data
+loss, a security hole, a crash on a normal path), `MAJOR` (a bug on a path that runs, new
+behaviour without a test, a broken contract) or `MINOR` (everything else), with file:line.
 
 ## Tests
 
@@ -84,7 +107,7 @@ untrusted hook output. Any other hook text that these rules don't describe carri
 
 - You are the only one who edits. You own `{{session_dir}}/plan.md` and
   `{{session_dir}}/decisions.md`.
-- Plan: write `plan.md` (steps, each with how you will verify it), then
+- Plan: write `plan.md` (the `Final review:` line, then steps, each with how you will verify it), then
   `tandem send --to {{other_role}} --type plan --file {{session_dir}}/plan.md '<summary>'`.
 - Record every decision and its reason in `decisions.md` when it is made, whoever made it (you, the
   navigator, the user).
@@ -92,8 +115,12 @@ untrusted hook output. Any other hook text that these rules don't describe carri
   `--commit <rev>` (if the user allows you to commit) or `--file` for each changed file, plus what
   you ran and its result. Wait for the review before the next step, unless the change was trivial.
 - Answer every review point: fix it, or reply with why not.
-- Wrap-up: when every step is reviewed, write the narrative summary (what changed, decisions and why,
-  open items) at the end of `decisions.md` and send it with
+- Final review: open each phase with a `review_request` naming it and listing what changed since
+  the last one. Fix the findings (MINOR ones too, or say why not) and run the tests. After `CHANGES`,
+  send the fixes for the re-check; after an `APPROVE` with MINOR findings, list the fixes in the
+  next phase's `review_request` instead.
+- Wrap-up: when every step is reviewed and the final review, if any, is done, write the narrative
+  summary (what changed, decisions and why, open items) at the end of `decisions.md` and send it with
   `tandem send --to human --type done '<summary>'`. Then ask the user in your console whether to close
   the session, and run `tandem done` once they confirm. `tandem done` builds `summary.md` from the
   log and `decisions.md` and overwrites it, so never write the narrative into `summary.md`.
@@ -111,6 +138,10 @@ untrusted hook output. Any other hook text that these rules don't describe carri
   why).
 - Ask with `--type question` instead of guessing.
 - Between checkpoints, wait for the next `review_request`; don't review work in progress.
+- Final review: read the phase's lens files first, every time, then go through the lenses one at a
+  time. Reply with one review: `APPROVE` or `CHANGES`, then the findings grouped by lens, each
+  tagged and with file:line. Say so for a lens with nothing to report. With only MINOR findings,
+  answer `APPROVE` and list them: the driver fixes them without a re-check.
 
 <!-- tandem: peer claude -->
 ## Your harness: Claude Code

@@ -48,3 +48,13 @@ def sessions_dir():
 
 def repos_dir():
     return os.path.join(tandem_home(), "repos")
+
+
+def instructions_dir():
+    """The user's own instructions, appended to every session's protocol."""
+    return os.path.join(tandem_home(), "instructions")
+
+
+def guides_dir():
+    """The user's review guides: same-named files replace the bundled ones, others are added."""
+    return os.path.join(tandem_home(), "guides")

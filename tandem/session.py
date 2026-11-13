@@ -413,6 +413,7 @@ def init_session(cwd=None, name=None, ticket=None, task=None, test_cmds=None, re
         "ticket": ticket,
         "task": task,
         "test_cmds": _normalise_test_cmds(test_cmds) if test_cmds is not None else detect_test_cmds(top),
+        "base": git(top, "rev-parse", "--verify", "--quiet", "HEAD"),
         "roles": dict(DEFAULT_ROLES),
         "created": iso(now),
         "ended": None,

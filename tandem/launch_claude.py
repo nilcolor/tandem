@@ -50,6 +50,7 @@ def prepare(meta, role=None, extra=()):
     session.write_json_atomic(settings_path(sdir), build_settings(meta, role))
     text = protocol.render(meta, PEER, role)
     session.write_text_atomic(protocol_path(sdir), text)
+    protocol.write_guides(sdir)
 
     # --add-dir lets Claude read (and, as driver, write) plan.md, decisions.md and reviews
     # in the session dir without a prompt. It takes several values, so it is followed by

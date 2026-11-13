@@ -225,6 +225,12 @@ class TreeTest(InitTestCase):
         self.assertEqual(os.listdir(os.path.join(sdir, "peers")), [])
         self.assertTrue(os.path.isfile(os.path.join(sdir, "lock")))
 
+    def test_base_is_none_before_the_first_commit(self):
+        repo = os.path.join(self.tmp, "fresh")
+        os.makedirs(repo)
+        self.git(repo, "init", "-q", "-b", "main")
+        self.assertIsNone(session.init_session(cwd=repo, name="first")["base"])
+
     def test_session_json(self):
         meta = self.init_ok()
         self.assertEqual(
@@ -236,6 +242,7 @@ class TreeTest(InitTestCase):
                 "ticket": None,
                 "task": None,
                 "test_cmds": [],
+                "base": self.git(self.repo, "rev-parse", "HEAD").strip(),
                 "roles": {"driver": "claude", "navigator": "agy"},
                 "created": "2026-11-11T10:05:00Z",
                 "ended": None,

@@ -37,12 +37,14 @@ spool's directories owner-only (0700): the log holds every prompt typed into a c
 
 ```
 ~/.tandem/sessions/<session>/
-  session.json       # name as typed, repo path, ticket/task, test_cmds, roles, claims, created/ended
+  session.json       # name as typed, repo path, ticket/task, test_cmds, base (HEAD at init), roles,
+                     # claims, created/ended
   lock               # the session flock: ids, log appends, role claims, rings, `done`
   peers/claude/      # settings.json (hooks, permissions) and protocol.md from `tandem claude`; hooks.log
   peers/agy/         # profile.json from `tandem agy`; conversation_id and hook state; hooks.log
   peers/<role>/      # watcher state: watch.pid, rung, watch.log (agy's detached watcher)
   .agents/           # hooks.json and rules/AGENTS.md; loaded via `agy --add-dir <session-dir>`
+  guides/            # the final review's lens checklists, written by both launchers
   inbox/driver/{tmp,new,cur}/
   inbox/navigator/{tmp,new,cur}/
   inbox/human/{tmp,new,cur}/
@@ -190,7 +192,11 @@ panes: the user runs each launcher in whatever terminal they like.
   (copy in `peers/claude/protocol.md`), agy through `.agents/rules/AGENTS.md` in the session dir,
   loaded with `--add-dir` ([customizations from an `--add-dir`](probes/2026-11-10-agy-1.5.4-permissions-and-sandbox.md#customizations-from-an---add-dir)).
   No tandem skill or agy plugin ships: launch-time instructions already reach both peers with user
-  authority, and a skill would be one more thing to install.
+  authority, and a skill would be one more thing to install. Rejected again for the final review's
+  workflow (2026-11-13): a skill arrives as conversation content, so compaction or agy's `/new` can
+  drop it where the system prompt and rules file stay; with model invocation off it can't be
+  loaded from the start instructions at all; and it can't carry the session's rendered values. The
+  workflow is protocol text, and only the bulky lens checklists are files read on demand (below).
 - **What `tandem agy` writes** (`tandem/launch_agy.py`): `.agents/hooks.json` with one hook name,
   `tandem`, holding `PreToolUse` (a `run_command` matcher group), `SessionStart`, `PreInvocation` and
   `Stop`, each calling `'<shim>' --session <dir> hook agy-…` (event names at the top level load
@@ -367,21 +373,45 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
 ## Protocol rules
 
 - Phases: intake (ticket, `--task` brief, or the user's first prompt), plan, plan review,
-  checkpointed implement + review, summary.
+  checkpointed implement + review, final review (code tasks only), summary.
+- **Final review.** `plan.md` opens with `Final review: yes|no`: yes when the task changes code, no
+  for a code review, research or a report, which have no change to review. The navigator checks the
+  call in the plan review. Three phases over the whole change (`git diff <base>`, `base` being
+  `HEAD` at `tandem init`, plus untracked files): comprehensive (quality, implementation, testing,
+  simplification, documentation), then smells, then critical only (quality and implementation,
+  critical and major findings, for what the fixes broke). Re-checks after fixes look at the fixes
+  and at critical and major findings only. Each phase is one item under bounded consensus, so the
+  3-round cap holds; a review with no critical or major finding ends a phase. The navigator answers
+  it `APPROVE` with the MINOR findings listed, and the driver fixes them without a re-check and lists
+  them in the next phase's `review_request`, so the next phase reviews them. Findings are tagged
+  `CRITICAL`/`MAJOR`/`MINOR` with file:line, and the driver fixes or answers every one, as for any
+  review: a peer's finding is an opinion, never an order. The lens checklists are files
+  (`tandem/templates/guides/`, copied into the session's `guides/` at launch), not protocol text,
+  because they are long and needed only during the final review. Lenses run one after another;
+  a Claude navigator fanning them out to subagents waits on checking that subagents keep its
+  Edit/Write deny (`docs/backlog/navigator-lens-subagents.md`).
+- **The user's own text**, global only, for every repo: `$TANDEM_HOME/instructions/shared.md`
+  and `<role>.md` are appended to the rendered protocol under "From the user" (after placeholder
+  substitution, so they stay literal), and `$TANDEM_HOME/guides/<name>.md` replaces a bundled guide
+  of that name or adds one. Rejected: a per-repo layer. The user wanted one set of instructions for
+  every repo and folder, and the obvious per-repo homes are either committed (the repo's
+  `CLAUDE.md`/`AGENTS.md`, which also reach both roles alike) or a naming scheme to invent.
 - **Bounded consensus.** The navigator must state risks and its strongest objection before it can
   approve. At most 3 rounds per item, then `escalate` to `human` with both positions. "Loop until
   agreed" is rejected because LLMs cave or loop.
 - **Checkpointed review**, per plan step or commit, not continuous parallel review that chases a
-  moving tree. Trivial changes skip review and are listed in the next `review_request`.
+  moving tree. Trivial changes skip review and are listed in the next `review_request`. Pipelining
+  (the driver starting the next step while a checkpoint is in review) is still open
+  (`docs/backlog/pipelined-checkpoints.md`).
 - A peer agreeing is never user approval. A reply is never promised: a model can ignore a message
   that arrived fine.
 - The shared rules never touch transport details. Only the per-peer section and launcher do, so
   peers can be swapped.
 - The rules live in `tandem/templates/protocol.md`: shared rules plus one section per role and per
   peer, rendered by `tandem/protocol.py` with the session's values (repo, session dir, doorbell,
-  test commands, message types from `maildir`). The task brief is cut at 6000 UTF-8 bytes in the
-  rendered protocol, with a note pointing at the full text in `session.json`, so the protocol stays
-  under 16 KB and agy's 24 KB rules cap holds.
+  test commands, message types from `maildir`). The task brief is cut at 6000 UTF-8 bytes and the
+  user's instructions at 4000, each with a note pointing at the full text, so the protocol stays
+  under 22 KB and agy's 24 KB rules cap holds.
 - A blocking wait is `tandem recv --timeout 100`: Claude's Bash tool kills a command at 120 s by
   default, which would cut the wait off before `recv` could exit 3 and trigger the escalation.
 - Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: both

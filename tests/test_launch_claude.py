@@ -121,6 +121,11 @@ class SettingsTest(LaunchTestCase):
         self.assertIn("## Your role: navigator", text)
         self.assertIn("## Your harness: Claude Code", text)
 
+    def test_guides_written(self):
+        self.launched("claude", "--role", "navigator")
+        guides = protocol.session_guides_dir(self.sdir)
+        self.assertEqual(sorted(os.listdir(guides)), sorted(protocol.guide_sources()))
+
     def test_relaunch_rewrites_config_for_new_role(self):
         self.launched("claude")
         self.launched("claude", "--role", "navigator")

@@ -149,6 +149,11 @@ class HooksJsonTest(AgyFilesTestCase):
 
 
 class RulesTest(AgyFilesTestCase):
+    def test_session_files_include_the_guides(self):
+        launch_agy.write_session_files(self.meta, "navigator")
+        guides = protocol.session_guides_dir(self.sdir)
+        self.assertEqual(sorted(os.listdir(guides)), sorted(protocol.guide_sources()))
+
     def test_rules_are_the_rendered_protocol(self):
         for role in ("navigator", "driver"):
             launch_agy.write_agents_dir(self.meta, role)

@@ -146,6 +146,7 @@ def write_session_files(meta, role):
     """Everything agy reads from the session dir for `role`."""
     write_agents_dir(meta, role)
     write_profile(meta, role)
+    protocol.write_guides(session.session_path(meta["dir"]))
 
 
 def agy_version():

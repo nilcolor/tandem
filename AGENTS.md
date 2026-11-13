@@ -23,10 +23,12 @@ tandem/watch.py            doorbell text, rung markers; watch --once (Claude) an
 tandem/cmdline.py          sh-style lexer and the navigator write gate
 tandem/hooks.py            `tandem hook <event>`: Claude's prompt log and the four agy hooks
 tandem/protocol.py         renders templates/protocol.md for a peer and role (code-owned values such as
-                           message types come in through placeholders); the launchers' initial prompt
+                           message types come in through placeholders) with the user's instructions
+                           appended; writes the session's guides/; the launchers' initial prompt
                            and its prefix; the tandem subcommands and test prefixes each role runs
                            unprompted (one list for every rule)
 tandem/templates/protocol.md  the protocol both peers get (shared, role and peer sections)
+tandem/templates/guides/   the final review's lens checklists, copied into each session's guides/
 tandem/launch_claude.py    `tandem claude`: settings.json, protocol, argv/env, exec
 tandem/launch_agy.py       `tandem agy`: agy version gate, hooks.json, rules, profiles, user deny carry-over
 tandem/human.py            `tandem human` REPL

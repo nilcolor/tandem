@@ -11,7 +11,11 @@ A session goes like this:
 2. The driver writes a plan; the navigator reviews it. They agree, or escalate to you.
 3. The driver works in checkpoints; the navigator reviews each one from the diff and its own test
    runs.
-4. The driver writes up what changed and why, asks you, and closes the session. tandem writes a
+4. If the task changed code, the navigator reviews the whole change in three passes: one across
+   every lens (quality, implementation, testing, simplification, documentation), one for code
+   smells, and a last one for critical issues only. A task with no code change (a review, research)
+   skips this.
+5. The driver writes up what changed and why, asks you, and closes the session. tandem writes a
    `summary.md` with every message, every prompt you typed and the decisions.
 
 The agents talk through a small mailbox on disk (`~/.tandem/sessions/<session>/`), not by pasting
@@ -195,6 +199,29 @@ Exit codes: 0 ok, 1 error, 2 mail (`watch --once`), 3 no mail or timeout (`recv`
   "always allow … (persist to settings.json)" options, which change your global config.
 - As a backstop, the driver checks `git status` at each checkpoint and treats any change it didn't
   make as a navigator violation.
+
+## Your own instructions and review guides
+
+Both live under `~/.tandem` (`$TANDEM_HOME`) and apply to every session, in any repo.
+
+| File | What it does |
+|---|---|
+| `instructions/shared.md` | Appended to both agents' protocol, under "From the user". |
+| `instructions/driver.md`, `instructions/navigator.md` | Appended after `shared.md` for that role only. |
+| `guides/<name>.md` | Replaces the bundled review guide of the same name, or adds a new one. |
+
+For example, `instructions/driver.md` with "Before the final review, run `dip rubocop` and
+`dip brakeman` and fix what they report" reaches the driver in every session.
+
+- Instructions count toward agy's rules-file cap, so together they're cut at 4000 bytes (with a note
+  pointing at the folder). Keep them short; put long material in a guide.
+- The bundled guides are the six lenses of the final review: `review-quality.md`,
+  `review-implementation.md`, `review-testing.md`, `review-simplification.md`,
+  `review-documentation.md` and `review-smells.md` (in `tandem/templates/guides/`). The launchers
+  copy them, with your replacements and additions, into the session's `guides/` folder; the
+  navigator reads them there when a phase starts. An added guide is only read if your instructions
+  say when to read it.
+- Both are read at launch: after editing them, restart `tandem claude` / `tandem agy`.
 
 ## Tips and known quirks
 

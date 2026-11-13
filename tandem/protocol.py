@@ -1,13 +1,18 @@
 import os
 import re
 
-from tandem import TandemError, maildir, session, watch
+from tandem import TandemError, maildir, paths, session, watch
 
-TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "protocol.md")
+TEMPLATES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+TEMPLATE = os.path.join(TEMPLATES, "protocol.md")
+GUIDES = os.path.join(TEMPLATES, "guides")
 PEERS = {"claude": "Claude Code", "agy": "agy"}
-# agy caps each rules file at 24 KB; the brief is the only unbounded value, so it is cut (in
-# UTF-8 bytes, the unit of agy's cap) to keep the whole protocol under 16 KB.
+# agy caps each rules file at 24 KB. The brief and the user's instructions are the only unbounded
+# parts, so each is cut (in UTF-8 bytes, the unit of agy's cap) to keep the whole protocol under
+# 22 KB, which leaves room for long test commands and paths.
 TASK_CAP = 6000
+INSTRUCTIONS_CAP = 4000
+INSTRUCTION_FILES = ("shared.md", "{role}.md")
 # The tandem subcommands the protocol has agents type, and the only ones pre-approved for them
 # (Claude allow rules, agy command rules). The rest (`claude`, `agy`, `init`, `human`,
 # `hook`, and `done` for a navigator) start a harness or end the session, so they get a prompt.
@@ -83,6 +88,16 @@ def initial_prompt(meta, role, before_recv=""):
     return " ".join(parts)
 
 
+def _cut(text, cap, where):
+    """`text` cut to `cap` UTF-8 bytes, with a note saying where the full text is."""
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text
+    return "%s\n\n[%s cut at %d bytes; the full text is %s.]" % (
+        raw[:cap].decode("utf-8", "ignore").rstrip(), where[0], cap, where[1]
+    )
+
+
 def _brief(meta, sdir):
     ticket = (meta.get("ticket") or "").strip()
     task = (meta.get("task") or "").strip()
@@ -90,14 +105,8 @@ def _brief(meta, sdir):
     if ticket:
         parts.append("Ticket: `%s`." % ticket)
     if task:
-        raw = task.encode("utf-8")
-        if len(raw) > TASK_CAP:
-            task = "%s\n\n[Brief cut at %d bytes; the full text is the `task` field of `%s`.]" % (
-                raw[:TASK_CAP].decode("utf-8", "ignore").rstrip(),
-                TASK_CAP,
-                os.path.join(sdir, "session.json"),
-            )
-        parts.append("Brief from the user:\n\n" + task)
+        where = ("Brief", "the `task` field of `%s`" % os.path.join(sdir, "session.json"))
+        parts.append("Brief from the user:\n\n" + _cut(task, TASK_CAP, where))
     if not ticket and not task:
         parts.append("No ticket or brief was given: the user's first prompt to the driver sets the task.")
     return "\n\n".join(parts)
@@ -120,6 +129,70 @@ def _tests(meta):
     return _code_list(cmds)
 
 
+def _review_range(meta):
+    base = meta.get("base")
+    if base:
+        return "`git diff %s` (the commit the session started from)" % base
+    return "every commit since the session started (`tandem log` shows when) and the working tree"
+
+
+def _read_user_file(path):
+    """A user file's text, stripped; None when it is missing or empty."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise TandemError("cannot read %s: %s" % (path, exc))
+    return text or None
+
+
+def user_instructions(role):
+    """The user's instructions for `role` from $TANDEM_HOME/instructions, shared first; "" if none."""
+    folder = paths.instructions_dir()
+    found = [_read_user_file(os.path.join(folder, name.format(role=role))) for name in INSTRUCTION_FILES]
+    text = "\n\n".join(t for t in found if t)
+    if not text:
+        return ""
+    return _cut(text, INSTRUCTIONS_CAP, ("Instructions", "in `%s`" % folder))
+
+
+def session_guides_dir(sdir):
+    return os.path.join(sdir, "guides")
+
+
+def guide_sources():
+    """{name: path} of the session's guides: the bundled ones, then the user's, which win by name."""
+    found = {}
+    for folder in (GUIDES, paths.guides_dir()):
+        try:
+            names = sorted(os.listdir(folder))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise TandemError("cannot list %s: %s" % (folder, exc))
+        for name in names:
+            path = os.path.join(folder, name)
+            if name.endswith(".md") and os.path.isfile(path):
+                found[name] = path
+    return found
+
+
+def write_guides(sdir):
+    """Write the guides into `<session dir>/guides/`, dropping any no longer in the sources."""
+    dest = session_guides_dir(sdir)
+    os.makedirs(dest, exist_ok=True)
+    sources = guide_sources()
+    for name, path in sources.items():
+        text = _read_user_file(path)
+        session.write_text_atomic(os.path.join(dest, name), (text or "") + "\n")
+    for name in os.listdir(dest):
+        if name not in sources:
+            os.remove(os.path.join(dest, name))
+    return dest
+
+
 def values(meta, peer, role):
     sdir = session.session_path(meta["dir"])
     other = _other(role)
@@ -134,6 +207,8 @@ def values(meta, peer, role):
         "other_peer": PEERS[other_peer],
         "brief": _brief(meta, sdir),
         "tests": _tests(meta),
+        "guides_dir": session_guides_dir(sdir),
+        "review_range": _review_range(meta),
         "doorbell": watch.doorbell(role),
         "watch_cmd": watch.detach_command(role),
         "launcher_prefix": LAUNCHER_PREFIX,
@@ -166,6 +241,10 @@ def render(meta, peer, role=None, path=TEMPLATE):
         if not any(s == sel for s, _ in sections):
             raise TandemError("protocol template has no %r section" % sel)
     vals = values(meta, peer, role)
-    # One substitution pass, so placeholder-like text inside the user's brief stays literal.
-    body = "\n\n".join(text for sel, text in sections if sel in wanted and text)
-    return _fill(body, vals) + "\n"
+    # One substitution pass, so placeholder-like text inside the user's brief stays literal; the
+    # user's instructions come after it for the same reason.
+    body = _fill("\n\n".join(text for sel, text in sections if sel in wanted and text), vals)
+    mine = user_instructions(role)
+    if mine:
+        body += "\n\n## From the user\n\nThe user's standing instructions for every tandem session:\n\n" + mine
+    return body + "\n"

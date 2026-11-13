@@ -1,10 +1,10 @@
 import os
 import re
 
-from tandem import TandemError, maildir, protocol, session, watch
+from tandem import TandemError, maildir, paths, protocol, session, watch
 from tests.helpers import TandemTestCase
 
-LIMIT = 16 * 1024
+LIMIT = 22 * 1024
 COMBOS = [("driver", "claude"), ("navigator", "agy"), ("navigator", "claude"), ("driver", "agy")]
 
 SHARED_RULES = [
@@ -28,6 +28,21 @@ SHARED_RULES = [
     "never by full\npath",
     "`tandem:`",
 ]
+
+
+def write_instructions(**files):
+    folder = paths.instructions_dir()
+    os.makedirs(folder, exist_ok=True)
+    for name, text in files.items():
+        with open(os.path.join(folder, name + ".md"), "w", encoding="utf-8") as f:
+            f.write(text)
+    return folder
+
+
+def write_user_guide(name, text):
+    os.makedirs(paths.guides_dir(), exist_ok=True)
+    with open(os.path.join(paths.guides_dir(), name), "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 class ProtocolTestCase(TandemTestCase):
@@ -84,6 +99,7 @@ class RenderTest(ProtocolTestCase):
                 self.assertLess(len(text.encode("utf-8")), LIMIT)
 
     def test_size_under_limit_with_huge_values(self):
+        write_instructions(shared="Ünïcode standing rule. " * 400, driver="Driver rule. " * 400, navigator="Nav. " * 900)
         meta = dict(
             self.meta,
             task="Ünïcode brief line with some words. " * 2000,
@@ -307,3 +323,123 @@ class ErrorTest(ProtocolTestCase):
             "<!-- tandem: role driver -->\nD\n<!-- tandem: role navigator -->\nN\n<!-- tandem: peer agy -->\nA\n"
         )
         self.assertEqual(protocol.render(self.meta, "claude", path=path), "C driver\n\nS\n\nD\n")
+
+
+class FinalReviewTest(ProtocolTestCase):
+    def test_every_role_and_peer_gets_the_phases(self):
+        guides = protocol.session_guides_dir(self.sdir)
+        for role, peer in COMBOS:
+            with self.subTest(role=role, peer=peer):
+                text = protocol.render(self.meta_for(role, peer), peer)
+                self.assertIn("## Final review", text)
+                self.assertIn("`Final review: yes` when the task changes code", text)
+                self.assertIn("`Final review: no`", text)
+                self.assertIn(guides, text)
+                for name in protocol.guide_sources():
+                    self.assertIn("`%s`" % name, text)
+                self.assertIn("1. Comprehensive", text)
+                self.assertIn("2. Smells", text)
+                self.assertIn("3. Critical only", text)
+                self.assertIn("`CRITICAL`", text)
+
+    def test_review_range_from_the_base_commit(self):
+        base = self.meta["base"]
+        self.assertTrue(base)
+        self.assertIn("`git diff %s`" % base, protocol.render(self.meta, "agy"))
+
+    def test_review_range_without_a_base(self):
+        for meta in (dict(self.meta, base=None), {k: v for k, v in self.meta.items() if k != "base"}):
+            text = protocol.render(meta, "agy")
+            self.assertIn("every commit since the session started", text)
+            self.assertClean(text)
+
+    def test_role_sections(self):
+        driver = protocol.render(self.meta_for("driver", "claude"), "claude")
+        self.assertIn("open each phase with a `review_request`", driver)
+        self.assertIn("after an `APPROVE` with MINOR findings", driver)
+        self.assertIn("the `Final review:` line", driver)
+        navigator = protocol.render(self.meta_for("navigator", "agy"), "agy")
+        self.assertIn("read the phase's lens files first", navigator)
+        self.assertIn("grouped by lens", navigator)
+        self.assertIn("With only MINOR findings,\n  answer `APPROVE`", navigator)
+
+
+class InstructionsTest(ProtocolTestCase):
+    def test_none_by_default(self):
+        self.assertNotIn("## From the user", protocol.render(self.meta, "claude"))
+
+    def test_shared_then_role_at_the_end(self):
+        write_instructions(shared="Answer in English.", driver="Run `dip rubocop` before wrap-up.", navigator="Check N+1s.")
+        text = protocol.render(self.meta_for("driver", "claude"), "claude")
+        self.assertTrue(text.endswith(
+            "## From the user\n\nThe user's standing instructions for every tandem session:\n\n"
+            "Answer in English.\n\nRun `dip rubocop` before wrap-up.\n"
+        ))
+        self.assertNotIn("Check N+1s.", text)
+        navigator = protocol.render(self.meta_for("navigator", "agy"), "agy")
+        self.assertIn("Answer in English.\n\nCheck N+1s.\n", navigator)
+        self.assertNotIn("dip rubocop", navigator)
+        self.assertClean(text)
+
+    def test_role_file_alone(self):
+        write_instructions(navigator="  \nCheck N+1s.\n\n")
+        text = protocol.render(self.meta_for("navigator", "agy"), "agy")
+        self.assertTrue(text.endswith("for every tandem session:\n\nCheck N+1s.\n"))
+
+    def test_empty_files_add_nothing(self):
+        write_instructions(shared="", driver=" \n")
+        self.assertNotIn("## From the user", protocol.render(self.meta_for("driver", "claude"), "claude"))
+
+    def test_placeholders_stay_literal(self):
+        write_instructions(shared="Keep {{doorbell}} and {{nope}} as typed.")
+        self.assertIn("Keep {{doorbell}} and {{nope}} as typed.", protocol.render(self.meta, "claude"))
+
+    def test_cut_at_the_cap(self):
+        folder = write_instructions(shared="日" * 3000)
+        text = protocol.render(self.meta, "claude")
+        self.assertIn("[Instructions cut at %d bytes; the full text is in `%s`.]" % (protocol.INSTRUCTIONS_CAP, folder), text)
+        self.assertNotIn("\ufffd", text)
+
+    def test_unreadable_file_is_an_error(self):
+        folder = write_instructions()
+        with open(os.path.join(folder, "shared.md"), "wb") as f:
+            f.write(b"\xff\xfe bad")
+        with self.assertRaisesRegex(TandemError, "cannot read .*shared.md"):
+            protocol.render(self.meta, "claude")
+
+
+class GuidesTest(ProtocolTestCase):
+    LENSES = {
+        "review-quality.md", "review-implementation.md", "review-testing.md",
+        "review-simplification.md", "review-documentation.md", "review-smells.md",
+    }
+
+    def written(self):
+        dest = protocol.write_guides(self.sdir)
+        self.assertEqual(dest, protocol.session_guides_dir(self.sdir))
+        out = {}
+        for name in os.listdir(dest):
+            with open(os.path.join(dest, name), encoding="utf-8") as f:
+                out[name] = f.read()
+        return out
+
+    def test_bundled_lenses(self):
+        files = self.written()
+        self.assertEqual(set(files), self.LENSES)
+        for name, text in files.items():
+            self.assertTrue(text.startswith("# Lens: "), name)
+
+    def test_user_guide_replaces_by_name_and_adds_others(self):
+        write_user_guide("review-smells.md", "# Our smells\n")
+        write_user_guide("rails.md", "# Rails\n")
+        write_user_guide("notes.txt", "ignored")
+        files = self.written()
+        self.assertEqual(set(files), self.LENSES | {"rails.md"})
+        self.assertEqual(files["review-smells.md"], "# Our smells\n")
+        self.assertEqual(files["rails.md"], "# Rails\n")
+
+    def test_rewrite_drops_guides_the_user_removed(self):
+        write_user_guide("rails.md", "# Rails\n")
+        self.written()
+        os.remove(os.path.join(paths.guides_dir(), "rails.md"))
+        self.assertNotIn("rails.md", self.written())
