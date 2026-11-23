@@ -38,12 +38,13 @@ spool's directories owner-only (0700): the log holds every prompt typed into a c
 ```
 ~/.tandem/sessions/<session>/
   session.json       # name as typed, repo path, ticket/task, test_cmds, base (HEAD at init), roles,
-                     # claims, created/ended
+                     # claims (by role), created/ended
   lock               # the session flock: ids, log appends, role claims, rings, `done`
-  peers/claude/      # settings.json (hooks, permissions) and protocol.md from `tandem claude`; hooks.log
-  peers/agy/         # profile.json from `tandem agy`; conversation_id and hook state; hooks.log
-  peers/<role>/      # watcher state: watch.pid, rung, watch.log (agy's detached watcher)
-  .agents/           # hooks.json and rules/AGENTS.md; loaded via `agy --add-dir <session-dir>`
+  peers/<role>/      # the harness in that role, keyed by role so two of a kind can pair:
+                     #   Claude: settings.json (hooks, permissions), protocol.md
+                     #   agy: profile.json, .agents/{hooks.json,rules/AGENTS.md} (its own
+                     #   --add-dir), conversation_id, last_input, watchdog
+                     #   both: hooks.log; watcher state: watch.pid, rung, watch.log
   guides/            # the final review's lens checklists, written by both launchers
   inbox/driver/{tmp,new,cur}/
   inbox/navigator/{tmp,new,cur}/
@@ -177,33 +178,52 @@ panes: the user runs each launcher in whatever terminal they like.
   line.
 - Defaults follow the user's preference: Claude drives, agy navigates. `--role` flips them, and the
   launcher picks the matching profile.
-- **Role claims.** A launcher records `claims.<peer> = {role, pid, ts}` in `session.json` and logs a
+- **Role claims.** A launcher records `claims.<role> = {peer, pid, ts}` in `session.json` and logs a
   `role_claimed` event before it `exec`s. `exec` keeps the pid, so a claim lives exactly as long as
-  the harness. `--role` taking the other peer's role swaps the two in `roles`, unless that peer has a
-  live claim (then it's an error: quit it first). A dead claim is released, so relaunching after a
-  crash never deadlocks. A second launcher for the same peer isn't refused yet
-  (`docs/backlog/second-launcher-for-same-peer-not-refused.md`). A pair is one Claude and one agy:
-  claims and peer dirs are keyed by peer, so two of the same harness collide
-  (`docs/backlog/same-harness-pair.md`).
+  the harness. A role with a live claim is refused to any launcher, the same harness's second launch
+  included (quit it first); a claim by the launcher's own pid doesn't count. A dead claim is
+  released, so relaunching after a crash never deadlocks. Without `--role`, a launcher takes the
+  role its harness holds and isn't running in. `--role` taking the other peer's role swaps the two
+  in `roles`, unless this harness is running in the role it holds: then it keeps that one too, and
+  the session becomes a **same-harness pair** (the launcher says so). Older sessions' peer-keyed
+  claims (`claims.<peer> = {role, pid, ts}`) are read as role claims and rewritten on the next
+  claim. The check is pid liveness only, so a pid reused after a crash reads as running until that
+  process exits.
+- **Same-harness pairs** (Claude + Claude, agy + agy): two pane launches,
+  `tandem agy --role driver`, then `tandem agy --role navigator` while the first runs. Everything a
+  harness owns lives under `peers/<role>/`, and a running harness's hooks take their role from
+  `TANDEM_ROLE`, checked against `roles` (a value `roles` contradicts falls back to the role that
+  harness holds, and none when it holds both, which keeps the write gate on). For agy the [two
+  instances probe](probes/2026-11-23-agy-1.5.15-two-instances.md) settled the rest: two agys in one
+  repo get separate language servers and presence locks; agy re-reads its rules every turn, so each
+  needs its own `.agents/`, which tandem puts in `peers/<role>/` and passes as a second `--add-dir`
+  (a nested `.agents/` isn't discovered from the session dir, and a legacy `<session>/.agents/` is
+  removed at launch); and the conversation id is per role, because a ring to the other agy's
+  conversation runs that turn out of sight in the ringing process. The pair loses the second
+  opinion a different model family gives; `-- --model` per launch keeps some of it.
 - Launchers export `TANDEM_SESSION` and `TANDEM_ROLE`, so hooks and `tandem send/recv` know who they
   are without flags, and `cd` to the repo's toplevel before `exec`.
 - **Protocol parity.** Both peers get the doorbell protocol and role rules from launch-time,
   user-authored instructions rendered from one template: Claude through `--append-system-prompt`
-  (copy in `peers/claude/protocol.md`), agy through `.agents/rules/AGENTS.md` in the session dir,
-  loaded with `--add-dir` ([customizations from an `--add-dir`](probes/2026-11-10-agy-1.5.4-permissions-and-sandbox.md#customizations-from-an---add-dir)).
+  (copy in `peers/<role>/protocol.md`), agy through `peers/<role>/.agents/rules/AGENTS.md`, loaded
+  with a second `--add-dir` ([customizations from an
+  `--add-dir`](probes/2026-11-10-agy-1.5.4-permissions-and-sandbox.md#customizations-from-an---add-dir)).
   No tandem skill or agy plugin ships: launch-time instructions already reach both peers with user
   authority, and a skill would be one more thing to install. Rejected again for the final review's
   workflow (2026-11-13): a skill arrives as conversation content, so compaction or agy's `/new` can
-  drop it where the system prompt and rules file stay; with model invocation off it can't be
-  loaded from the start instructions at all; and it can't carry the session's rendered values. The
-  workflow is protocol text, and only the bulky lens checklists are files read on demand (below).
-- **What `tandem agy` writes** (`tandem/launch_agy.py`): `.agents/hooks.json` with one hook name,
+  drop it where the system prompt and rules file stay; with model invocation off it can't be loaded
+  from the start instructions at all; and it can't carry the session's rendered values. The workflow
+  is protocol text, and only the bulky lens checklists are files read on demand (below).
+- **What `tandem agy` writes** (`tandem/launch_agy.py`), all under `peers/<role>/`:
+  `.agents/hooks.json` with one hook name,
   `tandem`, holding `PreToolUse` (a `run_command` matcher group), `SessionStart`, `PreInvocation` and
   `Stop`, each calling `'<shim>' --session <dir> hook agy-…` (event names at the top level load
   nothing, [1.5.5 re-check](probes/2026-11-11-agy-1.5.5-recheck.md)); `.agents/rules/AGENTS.md`, the
-  rendered protocol for agy's role (refused if over agy's 24 KB rules cap); and
-  `peers/agy/profile.json`, the navigator or driver profile ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
-  Nothing is installed globally and nothing is written into the target repo.
+  rendered protocol for agy's role (refused if over agy's 24 KB rules cap); and `profile.json`, the
+  navigator or driver profile ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
+  It launches `agy --add-dir peers/<role> --add-dir <session dir>`: agy's commands start in the last
+  `--add-dir`, and the protocol says they start in the session dir. Nothing is installed globally
+  and nothing is written into the target repo.
 - The test prefixes come from `session.json` `test_cmds` (detected at `init` or given with
   `--test-cmd`; whitespace collapsed and duplicates dropped), each approved only as
   `tandem test <cmd>` ([the test lock](#protocol-rules)). One containing `(` or `)` is left out of
@@ -250,13 +270,14 @@ busy one, and needs agy's environment, which only `run_command` children get
   watcher's pid once it has claimed `peers/<role>/watch.pid` (`{pid, ls_address}`), and returns. A
   live watcher for the same LS address means "already running", decided by the detached child under
   the session lock; any other pidfile is taken over.
-- The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`. The id is
-  read on every ring from the one `presence/<conversation>.lock` the agy process holds open
+- The watcher rings with `$ANTIGRAVITY_AGENTAPI_EXE agentapi send-message <id> <doorbell>`. The id
+  is read on every ring from the one `presence/<conversation>.lock` the agy process holds open
   (`/proc/<pid>/fd` on Linux, `lsof -p` on macOS; the agy pid is the nearest `agy` above the
-  `--detach` call, or `TANDEM_AGY_PID`), else from `peers/agy/conversation_id` (which every agy hook
-  rewrites), else `ANTIGRAVITY_CONVERSATION_ID`. The lock comes first because `/new` fires no hook,
-  so the hooks' file names the old conversation until the user next types, and a ring to it wakes
-  the old conversation out of sight. A fresh conversation acts on a ring only after its first turn.
+  `--detach` call, or `TANDEM_AGY_PID`), else from `peers/<role>/conversation_id` (which every hook
+  of that role's agy rewrites), else `ANTIGRAVITY_CONVERSATION_ID`. The lock comes first because
+  `/new` fires no hook, so the hooks' file names the old conversation until the user next types, and
+  a ring to it wakes the old conversation out of sight. A fresh conversation acts on a ring only
+  after its first turn.
 - A failed send (non-zero exit or an `{"error":…}` reply) isn't marked rung and is retried every
   5 s.
 - It exits when the LS port refuses a connect (checked every 5 s), when superseded, when the session
@@ -312,7 +333,7 @@ user's own config stays untouched.
 
 | Lever | Values | Effect |
 |---|---|---|
-| `--mode` / `agentMode` | `default`, `accept-edits`, `plan`, `auto` | `auto` approves edits and safe commands and sends commands leaving the sandbox to a reviewer agent; it needs the terminal sandbox |
+| `--mode` / `agentMode` | `default` (`""` in settings), `accept-edits`, `plan`, `auto` | `auto` approves edits and safe commands and sends commands leaving the sandbox to a reviewer agent; agy's default since 1.5.7, and offered in 1.5.15 even with the sandbox off |
 | `toolPermission` | `always-proceed`, `request-review` (user's default), `strict`, `proceed-in-sandbox` | whether terminal commands need approval |
 | `enableTerminalSandbox` | bool (user's default `false`) | restricted environment for commands |
 | `permissions.allow` / `deny` | `command(prefix)`, `read_file(path)`, `write_file(path)`, `execute_url(domain)`, `mcp(server/tool)` | `command(...)` is a prefix match on the command text, and compound commands are split and checked part by part |
@@ -323,7 +344,11 @@ user's own config stays untouched.
 ### agy profiles
 
 Both keep agy's sandbox off and terminal commands under `request-review`, whatever the user's global
-settings say, so the allowlist decides what runs unasked.
+settings say, so the allowlist decides what runs unasked. Both also set `agentMode` to `""`, the
+Default mode. agy has started in Auto since 1.5.7, and a navigator launched without a mode came up
+in Auto, sandbox off or not: its commands ran sandboxed (its first `tandem watch --detach` failed)
+and Auto's reviewer could approve commands off the allowlist (docs/probes 2026-11-23 pair live
+check). The driver's `--mode accept-edits` overrides it.
 
 - **Navigator**: a tight allowlist: the protocol's tandem subcommands (`command(tandem send)` and so
   on), the exact test commands behind the test lock (`command(tandem test dip rspec)`, never
@@ -467,24 +492,25 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
 
 `tandem hook <event>` is run by the generated harness configs: stdin JSON in, the hook's JSON (or
 nothing) out, always exit 0. A failure (malformed stdin, unknown session, any exception) prints the
-hook's safe output and adds one line to `peers/<peer>/hooks.log` (stderr when no session resolved).
+hook's safe output and adds one line to `peers/<role>/hooks.log` (stderr when no session or role
+resolved).
 Hooks call the shim by absolute path, so they don't depend on the harness's PATH.
 
 - `claude-prompt` (UserPromptSubmit) appends a `console` record to `log.jsonl` and prints nothing,
   since its stdout would join the model's context. It skips blank prompts, prompts starting with
   `tandem:` (the launcher's start line), an asyncRewake wake (a `<task-notification>` carrying the
   doorbell) and ended sessions.
-- The agy hooks all write `conversationId` to `peers/agy/conversation_id` first.
+- The agy hooks all write `conversationId` to `peers/<role>/conversation_id` first.
 - `agy-pretool`: [the write gate above](#the-pretooluse-hook), never `{}`.
 - `agy-session-start` injects a system message naming agy's role and session, the exact watcher
   command when no live watcher holds the pidfile, and the pending count.
 - `agy-preinvocation` logs `lastUserInput` as a `console` line once: it skips blank input, the
-  doorbell and `tandem:` lines, and input equal to `peers/agy/last_input`. The hook fires before
+  doorbell and `tandem:` lines, and input equal to `peers/<role>/last_input`. The hook fires before
   every model call of a turn with the same input and the payload carries no known turn marker, so
   the same text typed twice in a row is logged once.
 - `agy-stop`, only on `terminationReason` `NO_TOOL_CALL` with `fullyIdle`, returns `continue` to
-  restart a dead watcher (at most once per 60 s, `peers/agy/watchdog`) and/or to read unrung mail;
-  otherwise `{}`.
+  restart a dead watcher (at most once per 60 s, `peers/<role>/watchdog`) and/or to read unrung
+  mail; otherwise `{}`.
 
 No-op outputs: `{"decision":"ask"}` for `PreToolUse`, `{}` for the others
 ([1.5.5 re-check](probes/2026-11-11-agy-1.5.5-recheck.md)).
@@ -532,7 +558,8 @@ Not designed yet (`docs/backlog/tandem-dash.md`); this only records that Python 
 None blocking. Live-only or out of scope:
 
 - Whether agy's `PreInvocation` payload carries a per-turn marker; if it does, key
-  `peers/agy/last_input` on it so the same text typed twice is logged twice.
-- Whether agy hooks see `ANTIGRAVITY_LS_ADDRESS` (on 1.5.4 they got only the conversation id), so a
+  `peers/<role>/last_input` on it so the same text typed twice is logged twice.
+- Whether agy hooks see `ANTIGRAVITY_LS_ADDRESS` (on 1.5.4 and 1.5.15 they got only the conversation
+  id), so a
   hook judges a watcher by its pid alone until the watcher's own LS check ends it.
 - Whether agy's `plan` mode blocks running tests and shell writes.

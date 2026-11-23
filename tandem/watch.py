@@ -189,8 +189,10 @@ def agentapi_exe(environ):
     return environ.get("ANTIGRAVITY_AGENTAPI_EXE") or "agy"
 
 
-def conversation_path(sdir):
-    return os.path.join(session.peer_dir(sdir, "agy"), "conversation_id")
+def conversation_path(sdir, role):
+    """Per role: ringing an agy's LS with the other agy's conversation runs that conversation's turn
+    out of sight in the wrong process (docs/probes 2026-11-23 two instances)."""
+    return os.path.join(session.peer_dir(sdir, role), "conversation_id")
 
 
 def _capture(argv):
@@ -271,7 +273,7 @@ def presence_conversation(pid, paths=open_paths):
     return found.pop() if len(found) == 1 else None
 
 
-def conversation_id(sdir, environ, agy_pid=None, presence=presence_conversation):
+def conversation_id(sdir, role, environ, agy_pid=None, presence=presence_conversation):
     """agy's current conversation: from its presence lock, else as its hooks last wrote it.
 
     Read on every ring because `/new` changes it. `/new` fires no hook, so the hooks' file names
@@ -282,7 +284,7 @@ def conversation_id(sdir, environ, agy_pid=None, presence=presence_conversation)
         conv = presence(agy_pid)
         if conv:
             return conv
-    text = (session.read_text(conversation_path(sdir)) or "").strip()
+    text = (session.read_text(conversation_path(sdir, role)) or "").strip()
     return text or environ.get("ANTIGRAVITY_CONVERSATION_ID") or None
 
 
@@ -366,7 +368,7 @@ def _stamp(text):
 
 def _ring(sdir, role, pid, msg_id, environ, log, agy_pid=None):
     """Ring agy for `msg_id`; True once it rang (rung marker advanced unless superseded)."""
-    conv = conversation_id(sdir, environ, agy_pid)
+    conv = conversation_id(sdir, role, environ, agy_pid)
     if conv is None:
         log("no conversation id yet for #%s; will retry" % maildir.format_id(msg_id))
         return False

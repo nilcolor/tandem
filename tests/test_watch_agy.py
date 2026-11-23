@@ -102,8 +102,8 @@ class AgyWatchTestCase(TandemTestCase):
         return maildir.deliver(self.meta, maildir.build_envelope(sender, to, body))
 
     def set_conversation(self, conv):
-        os.makedirs(os.path.join(self.sdir, "peers", "agy"), exist_ok=True)
-        session.write_text_atomic(watch.conversation_path(self.sdir), conv + "\n")
+        os.makedirs(os.path.join(self.sdir, "peers", "navigator"), exist_ok=True)
+        session.write_text_atomic(watch.conversation_path(self.sdir, "navigator"), conv + "\n")
 
     def set_mode(self, mode):
         with open(os.path.join(self.state, "mode"), "w") as f:

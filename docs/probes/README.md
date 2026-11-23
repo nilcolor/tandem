@@ -15,3 +15,5 @@ here for the evidence. A new agy or Claude release that needs re-checking gets a
 | [2026-11-11-claude-permission-rules.md](2026-11-11-claude-permission-rules.md) | Claude Code permission rule syntax (from the docs) |
 | [2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md](2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md) | the end-to-end live check (plan Task 17): 1.5.6 dropped `unsandboxed(...)`, and the fixes that followed |
 | [2026-11-23-claude-2.1.330-subagent-deny.md](2026-11-23-claude-2.1.330-subagent-deny.md) | a subagent keeps the navigator's `--settings` deny of Edit, Write and NotebookEdit |
+| [2026-11-23-agy-1.5.15-two-instances.md](2026-11-23-agy-1.5.15-two-instances.md) | two agys in one repo: separate LS and locks, `.agents/` from a second `--add-dir`, rules re-read per turn, a mis-addressed ring runs in the wrong process |
+| [2026-11-23-agy-1.5.15-pair-live-check.md](2026-11-23-agy-1.5.15-pair-live-check.md) | an agy + agy pair through tandem until `done`: per-role rings and gate hold; the navigator started in Auto (agy's default since 1.5.7) |

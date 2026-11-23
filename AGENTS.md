@@ -69,21 +69,24 @@ Conventions:
 
 ## How generated configs map to harness features
 
-Launchers write everything into the session dir (`$TANDEM_HOME/sessions/<dir>/`), then `exec` the
-harness. Nothing goes into the target repo or the user's global config.
+Launchers write everything into the session dir (`$TANDEM_HOME/sessions/<dir>/`), under
+`peers/<role>/`, then `exec` the harness. Keyed by role, not harness, so both roles can run the same
+harness; hooks tell the two apart by `TANDEM_ROLE` (`session.env_role`). Nothing goes into the
+target repo or the user's global config.
 
-- **Claude** (`tandem claude`): `peers/claude/settings.json` passed with `--settings` carries the
+- **Claude** (`tandem claude`): `peers/<role>/settings.json` passed with `--settings` carries the
   Stop hook (`asyncRewake`, running `tandem watch --once`), the `UserPromptSubmit` hook
   (`tandem hook claude-prompt`) and the permissions. The rendered protocol goes in through
-  `--append-system-prompt` (copy in `peers/claude/protocol.md`), since Claude ignores instructions
+  `--append-system-prompt` (copy in `peers/<role>/protocol.md`), since Claude ignores instructions
   that arrive as hook text. `--add-dir <session dir>` lets it read and, as driver, write the shared
   files.
-- **agy** (`tandem agy`): `peers/agy/profile.json` passed with `--settings` is the whole permission
-  policy (navigator or driver profile, deny merged with the user's global deny).
-  `--add-dir <session dir>` makes agy load `.agents/hooks.json` and `.agents/rules/AGENTS.md` from
-  it. `hooks.json` has a single top-level hook name, `tandem`, holding the events; event names at
-  the top level load nothing. Its events come from `hooks.HOOKS` (each agy hook's `event`), so a hook
-  is named once.
+- **agy** (`tandem agy`): `peers/<role>/profile.json` passed with `--settings` is the whole
+  permission policy (navigator or driver profile, deny merged with the user's global deny).
+  `--add-dir peers/<role>` makes agy load `.agents/hooks.json` and `.agents/rules/AGENTS.md` from
+  it, and a second `--add-dir <session dir>`, last so agy's commands start there, gives it the
+  shared files. One `.agents/` per role, because agy re-reads its rules every turn. `hooks.json` has
+  a single top-level hook name, `tandem`, holding the events; event names at the top level load
+  nothing. Its events come from `hooks.HOOKS` (each agy hook's `event`), so a hook is named once.
 - Hook commands call the shim by absolute path; agents call plain `tandem …`, because permission
   rules match the command text.
 
@@ -91,12 +94,13 @@ harness. Nothing goes into the target repo or the user's global config.
 
 Everything is in the session dir, `$TANDEM_HOME/sessions/<dir>/` (`tandem status` lists them):
 
-- `peers/<peer>/hooks.log`: one line per hook failure (`claude` or `agy`); a hook always exits 0
-  with its safe output, so this is the only trace.
+- `peers/<role>/hooks.log`: one line per hook failure; a hook always exits 0 with its safe output,
+  so this is the only trace (stderr when the hook can't tell its session or role).
 - `peers/<role>/watch.log`: the agy watcher's own log (start, rings, failed `send-message` calls,
   exit reason); `peers/<role>/watch.pid` (`{pid, ls_address}`) and `peers/<role>/rung` (highest
   id rung) are its state, for Claude's waiter too.
-- `peers/agy/profile.json` is the profile the last `tandem agy` launched with.
+- `peers/<role>/profile.json` is the profile the last `tandem agy` in that role launched with;
+  `peers/<role>/conversation_id` is the conversation that agy's hooks last reported.
 - `log.jsonl` (`tandem log`) holds the `agy_profile` event with agy's role and version.
 - `MIN_AGY_VERSION` in `tandem/launch_agy.py` is the oldest agy tandem launches. Raise it only
   after a live check on the newer version, recorded as a new file in `docs/probes/`.

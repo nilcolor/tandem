@@ -112,6 +112,7 @@ class AcceptanceTestCase(TandemTestCase):
         with open(os.environ["FAKE_CLAUDE_OUT"]) as f:
             rec = json.load(f)
         self.claude_env = dict(os.environ, TANDEM_SESSION=rec["session"], TANDEM_ROLE=rec["role"])
+        self.claude_role = rec["role"]
         return rec
 
     def launch_agy(self, ls, *extra):
@@ -130,7 +131,7 @@ class AcceptanceTestCase(TandemTestCase):
         return rec
 
     def claude_settings(self):
-        with open(launch_claude.settings_path(self.sdir)) as f:
+        with open(launch_claude.settings_path(self.sdir, self.claude_role)) as f:
             return json.load(f)
 
     def claude_hook_command(self, event):
@@ -163,14 +164,15 @@ class AcceptanceTestCase(TandemTestCase):
         _, err = proc.communicate(timeout=timeout)
         return proc.returncode, err
 
-    def agy_hook(self, event, payload, env=None):
-        spec = None
-        with open(launch_agy.hooks_path(self.sdir)) as f:
+    def agy_hook(self, event, payload, env=None, conv=None):
+        env = env or self.agy_env
+        role = env["TANDEM_ROLE"]
+        with open(launch_agy.hooks_path(self.sdir, role)) as f:
             spec = json.load(f)["tandem"][event]
         command = spec[0]["hooks"][0]["command"] if event == "PreToolUse" else spec[0]["command"]
-        base = {"conversationId": self.conv, "workspacePaths": [self.repo], "cwd": self.repo, "hookEventName": event}
+        base = {"conversationId": conv or self.conv, "workspacePaths": [self.repo], "cwd": self.repo, "hookEventName": event}
         base.update(payload)
-        proc = self.sh(command, env or self.agy_env, json.dumps(base), cwd=launch_agy.agents_dir(self.sdir))
+        proc = self.sh(command, env, json.dumps(base), cwd=launch_agy.agents_dir(self.sdir, role))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout)
 
@@ -180,14 +182,15 @@ class AcceptanceTestCase(TandemTestCase):
     def agy_stop(self, **kw):
         return self.agy_hook("Stop", {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True}, **kw)
 
-    def agy_run(self, command, env=None):
+    def agy_run(self, command, env=None, conv=None):
         """agy runs `command` as a run_command tool call; the hook must pass it to agy's rules."""
-        self.assertEqual(self.pretool(command, env=env), ASK, command)
+        self.assertEqual(self.pretool(command, env=env, conv=conv), ASK, command)
         return self.ok(command, env or self.agy_env)
 
-    def start_agy_watcher(self, env=None):
-        out = self.agy_run(DETACH, env)
-        match = re.search(r"started for navigator \(pid (\d+)\)", out)
+    def start_agy_watcher(self, env=None, conv=None):
+        role = (env or self.agy_env)["TANDEM_ROLE"]
+        out = self.agy_run(DETACH.replace("--as navigator", "--as " + role), env, conv)
+        match = re.search(r"started for %s \(pid (\d+)\)" % role, out)
         self.assertIsNotNone(match, out)
         pid = int(match.group(1))
         self.agy_watchers.add(pid)
@@ -253,10 +256,10 @@ class EndToEndTest(AcceptanceTestCase):
 
         claude = self.launch_claude()
         self.assertEqual((claude["session"], claude["role"], claude["cwd"]), (self.dir, "driver", self.repo))
-        self.assertEqual(claude["argv"][claude["argv"].index("--settings") + 1], launch_claude.settings_path(sdir))
+        self.assertEqual(claude["argv"][claude["argv"].index("--settings") + 1], launch_claude.settings_path(sdir, "driver"))
         agy = self.launch_agy(self.ls)
         self.assertEqual((agy["session"], agy["role"]), (self.dir, "navigator"))
-        with open(launch_agy.profile_path(sdir)) as f:
+        with open(launch_agy.profile_path(sdir, "navigator")) as f:
             profile = json.load(f)
         self.assertEqual((profile["toolPermission"], profile["enableTerminalSandbox"]), ("request-review", False))
         self.assertIn("command(tandem test go test)", profile["permissions"]["allow"])
@@ -391,7 +394,7 @@ class EdgeCaseTest(AcceptanceTestCase):
         self.wait_for(lambda: first not in self.watcher_processes())
         self.ok("tandem send --to navigator --type plan 'Plan sent while nothing watched'", self.claude_env)
         # Past the watchdog's backoff since SessionStart's nudge.
-        session.write_text_atomic(os.path.join(self.sdir, "peers", "agy", "watchdog"), "0\n")
+        session.write_text_atomic(os.path.join(self.sdir, "peers", "navigator", "watchdog"), "0\n")
         stop = self.agy_stop()
         self.assertEqual(stop["decision"], "continue")
         self.assertIn("running exactly: tandem watch --as navigator --detach", stop["reason"])
@@ -455,3 +458,46 @@ class EdgeCaseTest(AcceptanceTestCase):
         self.assertIn("has ended", self.ok(DETACH, self.agy_env))
         self.assertEqual(self.sh(self.claude_hook_command("Stop"), self.claude_env).returncode, 0)
         self.assertEqual(self.watcher_processes(), [])
+
+
+class SameHarnessPairTest(AcceptanceTestCase):
+    """Two agys, one per role: each on its own language server and conversation, as the 2026-11-23
+    probe found them."""
+
+    def hold_claim(self, role):
+        """Stand in for the harness the fake launcher didn't keep running: a live claim on `role`."""
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        meta = session.load_session(self.dir)
+        meta["claims"][role]["pid"] = proc.pid
+        session.save_session(meta)
+
+    def test_two_agys_ring_their_own_conversations(self):
+        self.init()
+        driver_ls, navigator_ls = self.ls, self.new_ls()
+        self.launch_agy(driver_ls, "--role", "driver")
+        driver = self.agy_env
+        self.hold_claim("driver")
+        self.launch_agy(navigator_ls, "--role", "navigator")
+        navigator = self.agy_env
+        self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "agy", "navigator": "agy"})
+
+        for env, conv in ((driver, "conv-driver"), (navigator, "conv-navigator")):
+            started = self.agy_hook("SessionStart", {}, env=env, conv=conv)
+            role = env["TANDEM_ROLE"]
+            self.assertIn("you are the %s" % role, started["injectSteps"][0]["systemMessage"]["systemMessage"])
+            self.start_agy_watcher(env, conv)
+
+        self.ok("tandem send --to navigator --type plan 'Plan'", driver)
+        self.wait_for(lambda: len(self.calls()) == 1)
+        self.ok("tandem send --to driver --type answer --reply-to 1 'Looks fine'", navigator)
+        self.wait_for(lambda: len(self.calls()) == 2)
+        self.assertEqual(
+            [(c["ls"], c["argv"][2]) for c in self.calls()],
+            [(self.address(navigator_ls), "conv-navigator"), (self.address(driver_ls), "conv-driver")],
+        )
+
+        # The write gate tells them apart by TANDEM_ROLE alone: both are agy.
+        self.assertEqual(self.pretool("touch x", env=driver), ASK)
+        self.assertEqual(self.pretool("touch x", env=navigator)["decision"], "force_ask")

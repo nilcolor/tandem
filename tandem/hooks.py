@@ -45,21 +45,21 @@ def parse_payload(raw):
     return payload
 
 
-def hooks_log_path(sdir, peer):
-    return os.path.join(session.peer_dir(sdir, peer), "hooks.log")
+def hooks_log_path(sdir, role):
+    return os.path.join(session.peer_dir(sdir, role), "hooks.log")
 
 
-def note_failure(sdir, name, peer, exc):
-    """One line in `peers/<peer>/hooks.log`, or stderr when no session was found."""
+def note_failure(sdir, role, name, exc):
+    """One line in `peers/<role>/hooks.log`, or stderr when no session or role was found."""
     line = "%s %s: %s: %s" % (
         session.now_iso(),
         name,
         type(exc).__name__,
         str(exc).replace("\n", " ")[:ERROR_CAP],
     )
-    if sdir is not None:
+    if sdir is not None and role is not None:
         try:
-            path = hooks_log_path(sdir, peer)
+            path = hooks_log_path(sdir, role)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -72,12 +72,16 @@ def note_failure(sdir, name, peer, exc):
         pass
 
 
-def log_console(meta, peer, body):
-    """Append a `console` line for input typed into `peer`'s console; False if the session ended.
+def hook_role(meta, peer):
+    """The role of the harness running this hook; TandemError when it can't be told."""
+    role = session.env_role(meta, peer)
+    if role is None:
+        raise TandemError("can't tell which role this %s holds in session %s" % (peer, meta["dir"]))
+    return role
 
-    The role is read under the lock, so a role claimed after this hook's
-    process started is the one recorded.
-    """
+
+def log_console(meta, peer, body):
+    """Append a `console` line for input typed into `peer`'s console; False if the session ended."""
     sdir = session.session_path(meta["dir"])
     with session.locked(sdir):
         current = session.load_session(meta["dir"])
@@ -87,7 +91,7 @@ def log_console(meta, peer, body):
             "kind": "console",
             "ts": session.now_iso(),
             "from": "human",
-            "to": protocol.peer_role(current, peer),
+            "to": hook_role(current, peer),
             "peer": peer,
             "body": body,
         }
@@ -114,12 +118,12 @@ def claude_prompt(meta, payload):
     return None
 
 
-def _agy_file(sdir, name):
-    return os.path.join(session.peer_dir(sdir, "agy"), name)
+def _agy_file(sdir, role, name):
+    return os.path.join(session.peer_dir(sdir, role), name)
 
 
-def record_conversation(sdir, payload):
-    """Keep `peers/agy/conversation_id` current, so the watcher rings the conversation agy is on.
+def record_conversation(sdir, role, payload):
+    """Keep `peers/<role>/conversation_id` current, so the watcher rings the conversation agy is on.
 
     `run_hook` calls it before every agy hook, since each payload carries the id; an OSError
     there is logged, not raised, because the hook's own decision matters more.
@@ -128,7 +132,7 @@ def record_conversation(sdir, payload):
     if not isinstance(conv, str) or not conv.strip():
         return
     conv = conv.strip()
-    path = watch.conversation_path(sdir)
+    path = watch.conversation_path(sdir, role)
     current = session.read_text(path)
     if current is not None and current.strip() == conv:
         return
@@ -167,7 +171,7 @@ def agy_pretool(meta, payload):
     if not isinstance(command, str):
         raise HookInputError("run_command without a CommandLine string")
     # Writing is the driver's job; any other role (or none) is gated.
-    if session.role_of(meta, "agy") != "driver":
+    if session.env_role(meta, "agy") != "driver":
         reason = cmdline.write_reason(command) or _session_command(command)
         if reason is not None:
             return {
@@ -182,8 +186,8 @@ def _system_message(lines):
     return {"injectSteps": [{"systemMessage": {"systemMessage": "\n".join(lines)}}]}
 
 
-def _watchdog_due(sdir):
-    text = session.read_text(_agy_file(sdir, "watchdog"))
+def _watchdog_due(sdir, role):
+    text = session.read_text(_agy_file(sdir, role, "watchdog"))
     try:
         last = float(text) if text else None
     except ValueError:
@@ -192,9 +196,10 @@ def _watchdog_due(sdir):
     return last is None or not 0 <= now - last < WATCHDOG_BACKOFF
 
 
-def _mark_watchdog(sdir):
-    os.makedirs(os.path.dirname(_agy_file(sdir, "watchdog")), exist_ok=True)
-    session.write_text_atomic(_agy_file(sdir, "watchdog"), "%.3f\n" % _clock())
+def _mark_watchdog(sdir, role):
+    path = _agy_file(sdir, role, "watchdog")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    session.write_text_atomic(path, "%.3f\n" % _clock())
 
 
 def _claim_unrung(sdir, role):
@@ -210,11 +215,11 @@ def agy_session_start(meta, payload):
     sdir = session.session_path(meta["dir"])
     if not session.is_active(meta):
         return NOOP
-    role = protocol.peer_role(meta, "agy")
+    role = hook_role(meta, "agy")
     lines = ["tandem: you are the %s in tandem session %s." % (role, meta["dir"])]
     if not watch.agy_watcher_alive(sdir, role, os.environ):
         lines.append("Your tandem watcher is not running. Start it now by running exactly: %s" % watch.detach_command(role))
-        _mark_watchdog(sdir)
+        _mark_watchdog(sdir, role)
     pending = maildir.pending_counts(sdir)[role]
     if pending:
         lines.append("%d message(s) pending: run `tandem recv` until it says no mail." % pending)
@@ -227,7 +232,7 @@ def agy_preinvocation(meta, payload):
     """PreInvocation: log what the user typed into agy, once.
 
     It fires before every model call of a turn with the same `lastUserInput`,
-    so the last input seen is kept in `peers/agy/last_input`.
+    so the last input seen is kept in `peers/<role>/last_input`.
     """
     sdir = session.session_path(meta["dir"])
     if not session.is_active(meta):
@@ -239,7 +244,7 @@ def agy_preinvocation(meta, payload):
         raise HookInputError("lastUserInput is not a string")
     if not text.strip():
         return NOOP
-    path = _agy_file(sdir, "last_input")
+    path = _agy_file(sdir, hook_role(meta, "agy"), "last_input")
     if session.read_text(path) == text:
         return NOOP
     head = text.lstrip()
@@ -258,14 +263,14 @@ def agy_stop(meta, payload):
         return NOOP
     if payload.get("terminationReason") != "NO_TOOL_CALL" or payload.get("fullyIdle") is not True:
         return NOOP
-    role = protocol.peer_role(meta, "agy")
+    role = hook_role(meta, "agy")
     reasons = []
-    if not watch.agy_watcher_alive(sdir, role, os.environ) and _watchdog_due(sdir):
+    if not watch.agy_watcher_alive(sdir, role, os.environ) and _watchdog_due(sdir, role):
         reasons.append(
             "tandem: your watcher is not running, so you won't hear the doorbell. Start it by running "
             "exactly: %s" % watch.detach_command(role)
         )
-        _mark_watchdog(sdir)
+        _mark_watchdog(sdir, role)
     if _claim_unrung(sdir, role) is not None:
         reasons.append("tandem: new mail for %s. Run `tandem recv` until it says no mail." % role)
     if not reasons:
@@ -298,22 +303,23 @@ def configure_hook(p):
 
 def run_hook(args):
     hook = HOOKS[args.event]
-    sdir = None
+    sdir = role = None
     output = hook.safe
     try:
         # Drained before resolving, so the harness never writes into a closed pipe.
         raw = read_stdin()
         meta = session.resolve_args(args)
         sdir = session.session_path(meta["dir"])
+        role = session.env_role(meta, hook.peer)
         payload = parse_payload(raw)
-        if hook.peer == "agy":
+        if hook.peer == "agy" and role is not None:
             try:
-                record_conversation(sdir, payload)
+                record_conversation(sdir, role, payload)
             except OSError as exc:
-                note_failure(sdir, hook.name, hook.peer, exc)
+                note_failure(sdir, role, hook.name, exc)
         output = hook.run(meta, payload)
     except Exception as exc:
-        note_failure(sdir, hook.name, hook.peer, exc)
+        note_failure(sdir, role, hook.name, exc)
         output = hook.safe
     try:
         emit(output)

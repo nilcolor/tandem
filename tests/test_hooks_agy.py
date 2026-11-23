@@ -66,14 +66,14 @@ class AgyHookTestCase(TandemTestCase):
 
     def agy_file(self, name):
         try:
-            with open(os.path.join(self.sdir, "peers", "agy", name), encoding="utf-8") as f:
+            with open(os.path.join(self.sdir, "peers", "navigator", name), encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return None
 
     def hooks_log(self):
         try:
-            with open(hooks.hooks_log_path(self.sdir, "agy"), encoding="utf-8") as f:
+            with open(hooks.hooks_log_path(self.sdir, "navigator"), encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return ""
@@ -196,7 +196,7 @@ class PretoolWriteGateTest(AgyHookTestCase):
         for cmd in ("touch notes.txt", "git commit -am wip", "echo x > f", "tandem done", "tandem recv"):
             self.assertEqual(self.gate(cmd), ASK, cmd)
 
-    def test_role_read_from_session_not_env(self):
+    def test_env_role_the_session_contradicts_is_ignored(self):
         os.environ["TANDEM_ROLE"] = "driver"
         self.assertEqual(self.gate("touch x")["decision"], "force_ask")
 
@@ -251,17 +251,17 @@ class ConversationIdTest(AgyHookTestCase):
             conv = "conv-%d" % i
             self.out(event, self.stdin_for(event, conv))
             self.assertEqual(self.agy_file("conversation_id"), conv + "\n", event)
-            self.assertEqual(watch.conversation_id(self.sdir, {}), conv)
+            self.assertEqual(watch.conversation_id(self.sdir, "navigator", {}), conv)
 
     def test_atomic_write_leaves_no_temp_files(self):
         self.out("agy-pretool", self.stdin_for("agy-pretool", "conv-a"))
         self.out("agy-pretool", self.stdin_for("agy-pretool", "conv-b"))
-        self.assertEqual(sorted(os.listdir(os.path.join(self.sdir, "peers", "agy"))), ["conversation_id"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.sdir, "peers", "navigator"))), ["conversation_id"])
 
     def test_written_through_rename(self):
         with mock.patch.object(session, "write_text_atomic", wraps=session.write_text_atomic) as w:
             self.out("agy-pretool", self.stdin_for("agy-pretool", "conv-x"))
-        w.assert_called_once_with(watch.conversation_path(self.sdir), "conv-x\n")
+        w.assert_called_once_with(watch.conversation_path(self.sdir, "navigator"), "conv-x\n")
 
     def test_unchanged_id_not_rewritten(self):
         self.out("agy-pretool", self.stdin_for("agy-pretool", CONV))
@@ -355,8 +355,9 @@ class SessionStartTest(AgyHookTestCase):
 
     def test_agy_holds_no_role(self):
         self.update(roles={"driver": "claude", "navigator": "someone"})
-        self.assertEqual(self.start(), {})
-        self.assertIn("agy holds no role", self.hooks_log())
+        out, err = self.hook("agy-session-start", json.dumps(common("SessionStart")))
+        self.assertEqual(out, {})
+        self.assertIn("can't tell which role this agy holds", err)
 
     def test_malformed_stdin(self):
         self.assertEqual(self.out("agy-session-start", "nope"), {})
@@ -488,9 +489,9 @@ class StopTest(AgyHookTestCase):
         self.assertEqual(self.stop(), {})
 
     def test_watchdog_clock_skew_or_garbage(self):
-        os.makedirs(os.path.join(self.sdir, "peers", "agy"), exist_ok=True)
+        os.makedirs(os.path.join(self.sdir, "peers", "navigator"), exist_ok=True)
         for text in ("%f" % (self.clock + 3600), "garbage", ""):
-            with open(os.path.join(self.sdir, "peers", "agy", "watchdog"), "w") as f:
+            with open(os.path.join(self.sdir, "peers", "navigator", "watchdog"), "w") as f:
                 f.write(text)
             self.assertEqual(self.stop()["decision"], "continue", text)
 
@@ -574,3 +575,52 @@ class RegistryTest(AgyHookTestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             json.loads(proc.stdout)
         self.assertEqual([r["body"] for r in self.consoles()], ["hello"])
+
+
+class SameHarnessPairTest(AgyHookTestCase):
+    """Both roles are agy: each hook acts as the role its agy was launched for, from TANDEM_ROLE."""
+
+    def setUp(self):
+        super().setUp()
+        self.update(roles={"driver": "agy", "navigator": "agy"})
+
+    def as_role(self, role):
+        if role is None:
+            os.environ.pop("TANDEM_ROLE", None)
+        else:
+            os.environ["TANDEM_ROLE"] = role
+
+    def test_write_gate_follows_the_launched_role(self):
+        self.as_role("driver")
+        self.assertEqual(self.out("agy-pretool", pretool("touch x")), ASK)
+        self.as_role("navigator")
+        self.assertEqual(self.out("agy-pretool", pretool("touch x"))["decision"], "force_ask")
+
+    def test_without_a_role_the_write_gate_holds(self):
+        self.as_role(None)
+        self.assertEqual(self.out("agy-pretool", pretool("touch x"))["decision"], "force_ask")
+
+    def test_each_role_records_its_own_conversation(self):
+        for role, conv in (("driver", "conv-d"), ("navigator", "conv-n")):
+            self.as_role(role)
+            self.out("agy-pretool", json.dumps(dict(json.loads(pretool("ls")), conversationId=conv)))
+        self.assertEqual(watch.conversation_id(self.sdir, "driver", {}), "conv-d")
+        self.assertEqual(watch.conversation_id(self.sdir, "navigator", {}), "conv-n")
+
+    def test_session_start_names_the_launched_role(self):
+        self.as_role("driver")
+        message = self.out("agy-session-start", json.dumps(common("SessionStart")))["injectSteps"][0]
+        self.assertIn("you are the driver", message["systemMessage"]["systemMessage"])
+
+    def test_console_input_goes_to_the_launched_role(self):
+        self.as_role("driver")
+        self.out("agy-preinvocation", json.dumps(common("PreInvocation", lastUserInput="use the retry helper")))
+        self.assertEqual([(c["peer"], c["to"]) for c in self.consoles()], [("agy", "driver")])
+        self.assertTrue(os.path.exists(os.path.join(self.sdir, "peers", "driver", "last_input")))
+
+    def test_failures_log_under_the_launched_role(self):
+        self.as_role("driver")
+        self.out("agy-pretool", "not json")
+        with open(hooks.hooks_log_path(self.sdir, "driver"), encoding="utf-8") as f:
+            self.assertIn("HookInputError", f.read())
+        self.assertEqual(self.hooks_log(), "")

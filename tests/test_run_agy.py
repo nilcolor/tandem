@@ -84,13 +84,14 @@ class AgyLaunchTestCase(TandemTestCase):
         argv, env, cwd = calls[0]
         return argv, env, cwd, err
 
-    def profile(self):
-        with open(launch_agy.profile_path(self.sdir), encoding="utf-8") as f:
+    def profile(self, role="navigator"):
+        with open(launch_agy.profile_path(self.sdir, role), encoding="utf-8") as f:
             return json.load(f)
 
     def assert_nothing_written(self):
-        self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir)))
-        self.assertFalse(os.path.exists(launch_agy.agents_dir(self.sdir)))
+        for role in session.PAIR_ROLES:
+            self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir, role)), role)
+            self.assertFalse(os.path.exists(launch_agy.agents_dir(self.sdir, role)), role)
         self.assertEqual(self.events("agy_profile"), [])
         self.assertEqual(self.events("role_claimed"), [])
 
@@ -112,7 +113,7 @@ class VersionTest(AgyLaunchTestCase):
             self.assertIn("agy %s is too old: tandem needs agy 1.5.6 or later (run `agy update`)" % version, msg)
             self.assertEqual(calls, [])
             self.assert_nothing_written()
-        self.assertNotIn("agy", session.load_session(self.dir).get("claims", {}))
+        self.assertEqual(session.load_session(self.dir).get("claims", {}), {})
 
     def test_driver_needs_the_same_agy(self):
         os.environ["FAKE_AGY_VERSION"] = "1.5.5"
@@ -158,10 +159,14 @@ class VersionTest(AgyLaunchTestCase):
 class ArgvEnvTest(AgyLaunchTestCase):
     def test_navigator_argv(self):
         argv, env, cwd, _ = self.launched("agy")
-        self.assertEqual(argv[:5], ["agy", "--settings", launch_agy.profile_path(self.sdir), "--add-dir", self.sdir])
-        self.assertEqual(len(argv), 6)
+        role_dir = session.peer_dir(self.sdir, "navigator")
+        self.assertEqual(
+            argv[:7],
+            ["agy", "--settings", launch_agy.profile_path(self.sdir, "navigator"), "--add-dir", role_dir, "--add-dir", self.sdir],
+        )
+        self.assertEqual(len(argv), 8)
         self.assertNotIn("--mode", argv)
-        prompt = argv[5]
+        prompt = argv[7]
         self.assertTrue(prompt.startswith("--prompt-interactive=tandem:"))
         self.assertIn("navigator", prompt)
         self.assertIn("`tandem watch --as navigator --detach`", prompt)
@@ -172,14 +177,15 @@ class ArgvEnvTest(AgyLaunchTestCase):
 
     def test_driver_argv(self):
         argv, env, _, err = self.launched("agy", "--role", "driver")
-        self.assertEqual(argv[5:7], ["--mode", "accept-edits"])
-        self.assertTrue(argv[7].startswith("--prompt-interactive=tandem:"))
-        self.assertIn("`tandem watch --as driver --detach`", argv[7])
-        self.assertIn("intake", argv[7])
-        self.assertEqual(len(argv), 8)
+        self.assertEqual(argv[4], session.peer_dir(self.sdir, "driver"))
+        self.assertEqual(argv[7:9], ["--mode", "accept-edits"])
+        self.assertTrue(argv[9].startswith("--prompt-interactive=tandem:"))
+        self.assertIn("`tandem watch --as driver --detach`", argv[9])
+        self.assertIn("intake", argv[9])
+        self.assertEqual(len(argv), 10)
         self.assertEqual(env["TANDEM_ROLE"], "driver")
         self.assertEqual(err, "")
-        self.assertEqual(self.profile(), launch_agy.build_profile(session.load_session(self.dir), "driver"))
+        self.assertEqual(self.profile("driver"), launch_agy.build_profile(session.load_session(self.dir), "driver"))
 
     def test_profile_event(self):
         self.launched("agy")
@@ -192,7 +198,7 @@ class ArgvEnvTest(AgyLaunchTestCase):
         self.launched("agy")
         self.assertEqual(self.profile()["permissions"]["deny"], ["write_file(*)", "command(rm -rf)"])
         self.launched("agy", "--role", "driver")
-        self.assertEqual(self.profile()["permissions"]["deny"], ["command(rm -rf)"])
+        self.assertEqual(self.profile("driver")["permissions"]["deny"], ["command(rm -rf)"])
 
     def test_profile_option_is_gone(self):
         code, _, err = self.run_cli("agy", "--profile", "fallback")
@@ -201,8 +207,8 @@ class ArgvEnvTest(AgyLaunchTestCase):
 
     def test_extra_args_after_prompt(self):
         argv, _, _, _ = self.launched("agy", "--", "--model", "fast")
-        self.assertTrue(argv[5].startswith("--prompt-interactive="))
-        self.assertEqual(argv[6:], ["--model", "fast"])
+        self.assertTrue(argv[7].startswith("--prompt-interactive="))
+        self.assertEqual(argv[8:], ["--model", "fast"])
 
     def test_extra_without_separator_is_error(self):
         code, msg, _, calls = self.launch("agy", "stray")
@@ -224,13 +230,13 @@ class ArgvEnvTest(AgyLaunchTestCase):
 
     def test_session_files_written_for_role(self):
         self.launched("agy", "--role", "driver")
-        with open(launch_agy.rules_path(self.sdir), encoding="utf-8") as f:
+        with open(launch_agy.rules_path(self.sdir, "driver"), encoding="utf-8") as f:
             self.assertIn("## Your role: driver", f.read())
-        self.assertTrue(os.path.exists(launch_agy.hooks_path(self.sdir)))
+        self.assertTrue(os.path.exists(launch_agy.hooks_path(self.sdir, "driver")))
 
     def test_initial_prompt_is_not_logged_as_console(self):
         argv, _, _, _ = self.launched("agy")
-        prompt = argv[5][len("--prompt-interactive="):]
+        prompt = argv[7][len("--prompt-interactive="):]
         payload = {"conversationId": "c-1", "hookEventName": "PreInvocation", "lastUserInput": prompt}
         code, out, _ = self.run_cli("--session", self.dir, "hook", "agy-preinvocation", stdin=json.dumps(payload))
         self.assertEqual(code, 0)
@@ -241,8 +247,8 @@ class RoleClaimTest(AgyLaunchTestCase):
     def test_default_role_and_claim(self):
         self.launched("agy")
         meta = session.load_session(self.dir)
-        self.assertEqual(meta["claims"]["agy"]["role"], "navigator")
-        self.assertEqual(meta["claims"]["agy"]["pid"], os.getpid())
+        self.assertEqual(meta["claims"]["navigator"]["peer"], "agy")
+        self.assertEqual(meta["claims"]["navigator"]["pid"], os.getpid())
         [event] = self.events("role_claimed")
         self.assertEqual((event["peer"], event["role"]), ("agy", "navigator"))
 
@@ -252,13 +258,31 @@ class RoleClaimTest(AgyLaunchTestCase):
 
     def test_conflict_with_live_claude(self):
         meta = session.load_session(self.dir)
-        meta["claims"] = {"claude": {"role": "driver", "pid": os.getpid(), "ts": "2026-11-11T10:00:00Z"}}
+        meta["claims"] = {"driver": {"peer": "claude", "pid": os.getppid(), "ts": "2026-11-11T10:00:00Z"}}
         session.save_session(meta)
         code, msg, _, calls = self.launch("agy", "--role", "driver")
         self.assertEqual(code, 1)
         self.assertIn("claude is already the driver", msg)
         self.assertEqual(calls, [])
-        self.assertFalse(os.path.exists(launch_agy.profile_path(self.sdir)))
+        self.assert_nothing_written()
+
+    def test_second_agy_pairs_with_the_running_one(self):
+        meta = session.load_session(self.dir)
+        meta["roles"] = {"driver": "agy", "navigator": "claude"}
+        meta["claims"] = {"driver": {"peer": "agy", "pid": os.getppid(), "ts": "2026-11-23T10:00:00Z"}}
+        session.save_session(meta)
+        # The running driver's files, written by its own launch.
+        launch_agy.write_session_files(session.load_session(self.dir), "driver")
+        argv, env, _, err = self.launched("agy", "--role", "navigator")
+        self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "agy", "navigator": "agy"})
+        self.assertIn("agy is the navigator and the driver", err)
+        self.assertEqual(env["TANDEM_ROLE"], "navigator")
+        self.assertEqual(argv[4], session.peer_dir(self.sdir, "navigator"))
+        for role in session.PAIR_ROLES:
+            with open(launch_agy.rules_path(self.sdir, role), encoding="utf-8") as f:
+                self.assertIn("## Your role: %s" % role, f.read(), role)
+        self.assertEqual(self.profile("driver")["permissions"]["deny"], [])
+        self.assertIn("write_file(*)", self.profile("navigator")["permissions"]["deny"])
 
     def test_ended_session_refused(self):
         session.end_session(self.meta)
@@ -281,10 +305,14 @@ class RealExecTest(AgyLaunchTestCase):
             seen = json.load(f)
         self.assertEqual(seen["cwd"], self.repo)
         self.assertEqual((seen["session"], seen["role"]), (self.dir, "navigator"))
-        self.assertEqual(seen["argv"][:4], ["--settings", launch_agy.profile_path(self.sdir), "--add-dir", self.sdir])
-        self.assertTrue(seen["argv"][4].startswith("--prompt-interactive=tandem:"))
-        self.assertEqual(seen["argv"][5:], ["--model", "fast"])
-        self.assertEqual(session.load_session(self.dir)["claims"]["agy"]["pid"], seen["pid"])
+        role_dir = session.peer_dir(self.sdir, "navigator")
+        self.assertEqual(
+            seen["argv"][:6],
+            ["--settings", launch_agy.profile_path(self.sdir, "navigator"), "--add-dir", role_dir, "--add-dir", self.sdir],
+        )
+        self.assertTrue(seen["argv"][6].startswith("--prompt-interactive=tandem:"))
+        self.assertEqual(seen["argv"][7:], ["--model", "fast"])
+        self.assertEqual(session.load_session(self.dir)["claims"]["navigator"]["pid"], seen["pid"])
 
     def test_old_agy_via_shim(self):
         os.environ["FAKE_AGY_VERSION"] = "1.5.5"

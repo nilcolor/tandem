@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -33,14 +34,18 @@ class LaunchTestCase(TandemTestCase):
         self.assertEqual(len(calls), 1)
         return calls[0]
 
-    def settings(self):
-        with open(launch_claude.settings_path(self.sdir), encoding="utf-8") as f:
+    def settings(self, role="driver"):
+        with open(launch_claude.settings_path(self.sdir, role), encoding="utf-8") as f:
             return json.load(f)
 
     def set_claim(self, peer, role, pid):
         meta = session.load_session(self.dir)
-        meta.setdefault("claims", {})[peer] = {"role": role, "pid": pid, "ts": "2026-11-11T10:00:00Z"}
+        meta.setdefault("claims", {})[role] = {"peer": peer, "pid": pid, "ts": "2026-11-11T10:00:00Z"}
         session.save_session(meta)
+
+    def assert_no_settings(self):
+        for role in session.PAIR_ROLES:
+            self.assertFalse(os.path.exists(launch_claude.settings_path(self.sdir, role)), role)
 
 
 class SettingsTest(LaunchTestCase):
@@ -76,7 +81,7 @@ class SettingsTest(LaunchTestCase):
 
     def test_navigator_settings_deny_edits(self):
         self.launched("claude", "--role", "navigator")
-        s = self.settings()
+        s = self.settings("navigator")
         # No `tandem done` (nor init, claude, agy) for a navigator: those prompt.
         self.assertEqual(
             s["permissions"]["allow"],
@@ -115,7 +120,7 @@ class SettingsTest(LaunchTestCase):
     def test_protocol_file_matches_render(self):
         self.launched("claude", "--role", "navigator")
         meta = session.load_session(self.dir)
-        with open(launch_claude.protocol_path(self.sdir), encoding="utf-8") as f:
+        with open(launch_claude.protocol_path(self.sdir, "navigator"), encoding="utf-8") as f:
             text = f.read()
         self.assertEqual(text, protocol.render(meta, "claude"))
         self.assertIn("## Your role: navigator", text)
@@ -129,19 +134,19 @@ class SettingsTest(LaunchTestCase):
     def test_relaunch_rewrites_config_for_new_role(self):
         self.launched("claude")
         self.launched("claude", "--role", "navigator")
-        self.assertIn("deny", self.settings()["permissions"])
+        self.assertIn("deny", self.settings("navigator")["permissions"])
         self.launched("claude", "--role", "driver")
-        self.assertNotIn("deny", self.settings()["permissions"])
+        self.assertNotIn("deny", self.settings("driver")["permissions"])
 
 
 class ArgvEnvTest(LaunchTestCase):
     def test_argv(self):
         argv, _, _ = self.launched("claude")
-        with open(launch_claude.protocol_path(self.sdir), encoding="utf-8") as f:
+        with open(launch_claude.protocol_path(self.sdir, "driver"), encoding="utf-8") as f:
             text = f.read()
         self.assertEqual(
             argv[:7],
-            ["claude", "--add-dir", self.sdir, "--settings", launch_claude.settings_path(self.sdir),
+            ["claude", "--add-dir", self.sdir, "--settings", launch_claude.settings_path(self.sdir, "driver"),
              "--append-system-prompt", text],
         )
         self.assertEqual(argv[7], "--")
@@ -198,8 +203,8 @@ class RoleClaimTest(LaunchTestCase):
         self.launched("claude")
         meta = session.load_session(self.dir)
         self.assertEqual(meta["roles"], {"driver": "claude", "navigator": "agy"})
-        self.assertEqual(meta["claims"]["claude"]["role"], "driver")
-        self.assertEqual(meta["claims"]["claude"]["pid"], os.getpid())
+        self.assertEqual(meta["claims"]["driver"]["peer"], "claude")
+        self.assertEqual(meta["claims"]["driver"]["pid"], os.getpid())
         [event] = self.events("role_claimed")
         self.assertEqual((event["peer"], event["role"]), ("claude", "driver"))
         self.assertNotIn("was", event)
@@ -220,7 +225,7 @@ class RoleClaimTest(LaunchTestCase):
         self.assertEqual(env["TANDEM_ROLE"], "navigator")
 
     def test_conflict_with_live_peer(self):
-        self.set_claim("agy", "navigator", os.getpid())
+        self.set_claim("agy", "navigator", os.getppid())
         before = session.load_session(self.dir)
         code, err, calls = self.launch("claude", "--role", "navigator")
         self.assertEqual(code, 1)
@@ -228,10 +233,10 @@ class RoleClaimTest(LaunchTestCase):
         self.assertEqual(calls, [])
         self.assertEqual(session.load_session(self.dir), before)
         self.assertEqual(self.events("role_claimed"), [])
-        self.assertFalse(os.path.exists(launch_claude.settings_path(self.sdir)))
+        self.assert_no_settings()
 
     def test_cli_reports_conflict(self):
-        self.set_claim("agy", "navigator", os.getpid())
+        self.set_claim("agy", "navigator", os.getppid())
         code, out, err = self.run_cli("claude", "--role", "navigator")
         self.assertEqual(code, 1)
         self.assertIn("tandem: agy is already the navigator", err)
@@ -242,7 +247,7 @@ class RoleClaimTest(LaunchTestCase):
         self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "agy", "navigator": "claude"})
 
     def test_live_peer_in_other_role_is_no_conflict(self):
-        self.set_claim("agy", "navigator", os.getpid())
+        self.set_claim("agy", "navigator", os.getppid())
         _, env, _ = self.launched("claude")
         self.assertEqual(env["TANDEM_ROLE"], "driver")
 
@@ -257,9 +262,10 @@ class RoleClaimTest(LaunchTestCase):
         self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "claude", "navigator": "agy"})
 
     def test_claim_shared_by_other_launchers(self):
-        meta = session.claim_role(self.dir, "agy", "driver", pid=4242)
+        meta, role = session.claim_role(self.dir, "agy", "driver", pid=4242)
+        self.assertEqual(role, "driver")
         self.assertEqual(meta["roles"], {"driver": "agy", "navigator": "claude"})
-        self.assertEqual(meta["claims"]["agy"], {"role": "driver", "pid": 4242, "ts": meta["claims"]["agy"]["ts"]})
+        self.assertEqual(meta["claims"], {"driver": {"peer": "agy", "pid": 4242, "ts": meta["claims"]["driver"]["ts"]}})
 
     def test_bad_role(self):
         with self.assertRaises(TandemError):
@@ -277,6 +283,107 @@ class RoleClaimTest(LaunchTestCase):
         self.assertIn("invalid choice", err)
 
 
+class SameHarnessPairTest(LaunchTestCase):
+    """Two harnesses of one kind: claims are keyed by role, and a running harness keeps its role."""
+
+    def set_roles(self, **roles):
+        meta = session.load_session(self.dir)
+        meta["roles"] = roles
+        session.save_session(meta)
+
+    def test_second_claude_joins_as_the_other_role(self):
+        self.set_claim("claude", "driver", os.getppid())
+        err = io.StringIO()
+        meta, role = session.claim_for_launch(self.dir, "claude", "navigator", err=err)
+        self.assertEqual(role, "navigator")
+        self.assertEqual(meta["roles"], {"driver": "claude", "navigator": "claude"})
+        self.assertEqual(
+            {r: (c["peer"], c["pid"]) for r, c in meta["claims"].items()},
+            {"driver": ("claude", os.getppid()), "navigator": ("claude", os.getpid())},
+        )
+        self.assertIn("claude is the navigator and the driver", err.getvalue())
+        self.assertNotIn("launch the driver", err.getvalue())
+        [event] = self.events("role_claimed")
+        self.assertNotIn("was", event)
+
+    def test_relaunch_alone_names_the_other_launch(self):
+        self.set_roles(driver="claude", navigator="claude")
+        err = io.StringIO()
+        session.claim_for_launch(self.dir, "claude", "navigator", err=err)
+        self.assertIn("launch the driver with `tandem claude --role driver`", err.getvalue())
+
+    def test_each_claude_gets_its_own_config(self):
+        self.set_claim("claude", "driver", os.getppid())
+        argv, env, _ = self.launched("claude", "--role", "navigator")
+        self.assertEqual(env["TANDEM_ROLE"], "navigator")
+        self.assertEqual(argv[argv.index("--settings") + 1], launch_claude.settings_path(self.sdir, "navigator"))
+        self.assertIn("deny", self.settings("navigator")["permissions"])
+        self.assertFalse(os.path.exists(launch_claude.settings_path(self.sdir, "driver")))
+
+    def test_second_launch_without_role_names_the_flag(self):
+        self.set_claim("claude", "driver", os.getppid())
+        code, err, calls = self.launch("claude")
+        self.assertEqual(code, 1)
+        self.assertIn("claude is already the driver", err)
+        self.assertIn("pass --role navigator to run a second claude as the navigator", err)
+        self.assertEqual(calls, [])
+
+    def test_running_role_is_refused_to_the_same_harness(self):
+        self.set_claim("claude", "driver", os.getppid())
+        code, err, calls = self.launch("claude", "--role", "driver")
+        self.assertEqual(code, 1)
+        self.assertIn("claude is already the driver", err)
+        self.assertEqual(calls, [])
+
+    def test_pair_default_is_the_role_nobody_runs(self):
+        self.set_roles(driver="claude", navigator="claude")
+        self.set_claim("claude", "navigator", os.getppid())
+        _, env, _ = self.launched("claude")
+        self.assertEqual(env["TANDEM_ROLE"], "driver")
+
+    def test_pair_with_neither_running_needs_the_flag(self):
+        self.set_roles(driver="claude", navigator="claude")
+        code, err, _ = self.launch("claude")
+        self.assertEqual(code, 1)
+        self.assertIn("claude holds both roles", err)
+        _, env, _ = self.launched("claude", "--role", "navigator")
+        self.assertEqual(env["TANDEM_ROLE"], "navigator")
+        self.assertEqual(session.load_session(self.dir)["roles"], {"driver": "claude", "navigator": "claude"})
+
+    def test_pair_with_both_running_is_refused(self):
+        self.set_roles(driver="claude", navigator="claude")
+        self.set_claim("claude", "driver", os.getppid())
+        self.set_claim("claude", "navigator", os.getppid())
+        code, err, _ = self.launch("claude")
+        self.assertEqual(code, 1)
+        self.assertIn("both are running", err)
+
+    def test_other_harness_takes_a_pair_role(self):
+        self.set_roles(driver="claude", navigator="claude")
+        meta, role = session.claim_role(self.dir, "agy", "navigator", pid=4242)
+        self.assertEqual(meta["roles"], {"driver": "claude", "navigator": "agy"})
+
+    def test_quit_harness_still_swaps(self):
+        self.set_claim("claude", "driver", self.dead_pid())
+        self.launched("claude", "--role", "navigator")
+        meta = session.load_session(self.dir)
+        self.assertEqual(meta["roles"], {"driver": "agy", "navigator": "claude"})
+        # The old driver claim went with the swap.
+        self.assertEqual(list(meta["claims"]), ["navigator"])
+
+    def test_peer_keyed_claims_from_older_sessions(self):
+        meta = session.load_session(self.dir)
+        meta["claims"] = {"agy": {"role": "navigator", "pid": os.getppid(), "ts": "2026-11-11T10:00:00Z"}}
+        session.save_session(meta)
+        code, err, _ = self.launch("claude", "--role", "navigator")
+        self.assertEqual(code, 1)
+        self.assertIn("agy is already the navigator", err)
+        self.launched("claude")
+        claims = session.load_session(self.dir)["claims"]
+        self.assertEqual(sorted(claims), ["driver", "navigator"])
+        self.assertEqual(claims["navigator"]["peer"], "agy")
+
+
 class EndedSessionTest(LaunchTestCase):
     def test_ended_session_refused(self):
         session.end_session(self.meta)
@@ -284,7 +391,7 @@ class EndedSessionTest(LaunchTestCase):
         self.assertEqual(code, 1)
         self.assertIn("has ended", err)
         self.assertEqual(calls, [])
-        self.assertFalse(os.path.exists(launch_claude.settings_path(self.sdir)))
+        self.assert_no_settings()
         self.assertEqual(self.events("role_claimed"), [])
 
     def test_ended_session_via_env(self):
@@ -338,7 +445,7 @@ class RealExecTest(LaunchTestCase):
         self.assertEqual(seen["argv"][6:8], ["--model", "opus"])
         self.assertTrue(seen["argv"][-1].startswith("tandem:"))
         # exec keeps the launcher's pid, so the claim tracks the running harness.
-        self.assertEqual(session.load_session(self.dir)["claims"]["claude"]["pid"], seen["pid"])
+        self.assertEqual(session.load_session(self.dir)["claims"]["driver"]["pid"], seen["pid"])
 
     def test_repo_gone(self):
         argv, env, _ = launch_claude.prepare(self.meta)

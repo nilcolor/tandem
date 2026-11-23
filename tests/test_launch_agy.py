@@ -63,7 +63,7 @@ class AgyFilesTestCase(TandemTestCase):
             return f.read()
 
     def handler_command(self, event):
-        spec = self.read_json(launch_agy.hooks_path(self.sdir))["tandem"][event]
+        spec = self.read_json(launch_agy.hooks_path(self.sdir, "navigator"))["tandem"][event]
         if event == "PreToolUse":
             return spec[0]["hooks"][0]["command"]
         return spec[0]["command"]
@@ -76,7 +76,7 @@ class AgyFilesTestCase(TandemTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            cwd=launch_agy.agents_dir(self.sdir),
+            cwd=launch_agy.agents_dir(self.sdir, "navigator"),
             env=dict(os.environ),
         )
 
@@ -85,7 +85,7 @@ class HooksJsonTest(AgyFilesTestCase):
     def setUp(self):
         super().setUp()
         launch_agy.write_agents_dir(self.meta, "navigator")
-        self.doc = self.read_json(launch_agy.hooks_path(self.sdir))
+        self.doc = self.read_json(launch_agy.hooks_path(self.sdir, "navigator"))
 
     def command(self, hook):
         return "'%s' --session %s hook %s" % (SHIM, self.dir, hook)
@@ -121,7 +121,7 @@ class HooksJsonTest(AgyFilesTestCase):
 
     def test_same_for_both_roles(self):
         launch_agy.write_agents_dir(self.meta, "driver")
-        self.assertEqual(self.read_json(launch_agy.hooks_path(self.sdir)), self.doc)
+        self.assertEqual(self.read_json(launch_agy.hooks_path(self.sdir, "driver")), self.doc)
 
     def test_matches_build_hooks(self):
         self.assertEqual(self.doc, launch_agy.build_hooks(self.meta))
@@ -143,7 +143,7 @@ class HooksJsonTest(AgyFilesTestCase):
             proc = self.run_handler(event, json.dumps(payload))
             self.assertEqual(proc.returncode, 0, (event, proc.stderr))
             self.assertIsInstance(json.loads(proc.stdout), dict, event)
-        self.assertEqual(self.read_text(os.path.join(self.sdir, "peers", "agy", "conversation_id")).strip(), "c-1")
+        self.assertEqual(self.read_text(os.path.join(self.sdir, "peers", "navigator", "conversation_id")).strip(), "c-1")
         consoles = [r for r in session.read_log(self.sdir) if r.get("kind") == "console"]
         self.assertEqual([(c["peer"], c["to"], c["body"]) for c in consoles], [("agy", "navigator", "hello")])
 
@@ -157,22 +157,32 @@ class RulesTest(AgyFilesTestCase):
     def test_rules_are_the_rendered_protocol(self):
         for role in ("navigator", "driver"):
             launch_agy.write_agents_dir(self.meta, role)
-            self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", role))
+            self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir, role)), protocol.render(self.meta, "agy", role))
 
     def test_navigator_rules_carry_the_watcher_command(self):
         launch_agy.write_agents_dir(self.meta, "navigator")
-        text = self.read_text(launch_agy.rules_path(self.sdir))
+        text = self.read_text(launch_agy.rules_path(self.sdir, "navigator"))
         self.assertIn("tandem watch --as navigator --detach", text)
         self.assertIn("APIX-7", text)
 
     def test_rules_path(self):
-        self.assertEqual(launch_agy.rules_path(self.sdir), os.path.join(self.sdir, ".agents", "rules", "AGENTS.md"))
-        self.assertEqual(launch_agy.write_agents_dir(self.meta, "navigator"), os.path.join(self.sdir, ".agents"))
+        agents = os.path.join(self.sdir, "peers", "navigator", ".agents")
+        self.assertEqual(launch_agy.rules_path(self.sdir, "navigator"), os.path.join(agents, "rules", "AGENTS.md"))
+        self.assertEqual(launch_agy.write_agents_dir(self.meta, "navigator"), agents)
+
+    def test_legacy_agents_dir_is_removed(self):
+        # A session from before same-harness pairs kept it at the root, where both agys load it.
+        legacy = os.path.join(self.sdir, ".agents", "rules")
+        os.makedirs(legacy)
+        with open(os.path.join(legacy, "AGENTS.md"), "w") as f:
+            f.write("old rules\n")
+        launch_agy.write_agents_dir(self.meta, "navigator")
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, ".agents")))
 
     def test_huge_brief_stays_under_cap(self):
         meta = session.init_session(cwd=self.repo, name="huge", task="x" * 100000, test_cmds=["go test"] * 50, replace=True)
         launch_agy.write_agents_dir(meta, "navigator")
-        size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"])))
+        size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"]), "navigator"))
         self.assertLess(size, launch_agy.RULES_CAP)
 
     def test_multibyte_brief_stays_under_cap(self):
@@ -180,7 +190,7 @@ class RulesTest(AgyFilesTestCase):
         for char in ("日", "😀"):
             meta = session.init_session(cwd=self.repo, name="mb", task=char * 6000, replace=True)
             launch_agy.write_agents_dir(meta, "navigator")
-            size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"])))
+            size = os.path.getsize(launch_agy.rules_path(session.session_path(meta["dir"]), "navigator"))
             self.assertLess(size, launch_agy.RULES_CAP, char)
 
     def test_over_cap_writes_nothing(self):
@@ -188,8 +198,8 @@ class RulesTest(AgyFilesTestCase):
             with self.assertRaises(TandemError) as ctx:
                 launch_agy.write_agents_dir(self.meta, "navigator")
         self.assertIn("cap", str(ctx.exception))
-        self.assertFalse(os.path.exists(launch_agy.hooks_path(self.sdir)))
-        self.assertFalse(os.path.exists(launch_agy.rules_path(self.sdir)))
+        self.assertFalse(os.path.exists(launch_agy.hooks_path(self.sdir, "navigator")))
+        self.assertFalse(os.path.exists(launch_agy.rules_path(self.sdir, "navigator")))
 
     def test_unicode_counts_bytes(self):
         text = "é" * (launch_agy.RULES_CAP // 2 + 1)
@@ -197,12 +207,13 @@ class RulesTest(AgyFilesTestCase):
             with self.assertRaises(TandemError):
                 launch_agy.render_rules(self.meta, "navigator")
 
-    def test_rewrite_replaces_old_role(self):
+    def test_each_role_keeps_its_own_rules(self):
         launch_agy.write_agents_dir(self.meta, "driver")
         launch_agy.write_agents_dir(self.meta, "navigator")
-        self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", "navigator"))
-        leftovers = [n for n in os.listdir(os.path.dirname(launch_agy.rules_path(self.sdir))) if n != "AGENTS.md"]
-        self.assertEqual(leftovers, [])
+        for role in ROLES:
+            path = launch_agy.rules_path(self.sdir, role)
+            self.assertEqual(self.read_text(path), protocol.render(self.meta, "agy", role), role)
+            self.assertEqual(os.listdir(os.path.dirname(path)), ["AGENTS.md"], role)
 
 
 class ProfileTest(AgyFilesTestCase):
@@ -210,6 +221,7 @@ class ProfileTest(AgyFilesTestCase):
         self.assertEqual(
             launch_agy.build_profile(self.meta, "navigator"),
             {
+                "agentMode": "",
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
@@ -227,6 +239,7 @@ class ProfileTest(AgyFilesTestCase):
         self.assertEqual(
             launch_agy.build_profile(self.meta, "driver"),
             {
+                "agentMode": "",
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
@@ -257,17 +270,17 @@ class ProfileTest(AgyFilesTestCase):
 
     def test_default_path(self):
         path = launch_agy.write_profile(self.meta, "navigator")
-        self.assertEqual(path, os.path.join(self.sdir, "peers", "agy", "profile.json"))
+        self.assertEqual(path, os.path.join(self.sdir, "peers", "navigator", "profile.json"))
         self.assertEqual(self.read_json(path), launch_agy.build_profile(self.meta, "navigator"))
 
     def test_write_session_files(self):
         launch_agy.write_session_files(self.meta, "navigator")
-        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir)), launch_agy.build_profile(self.meta, "navigator"))
-        self.assertTrue(os.path.exists(launch_agy.hooks_path(self.sdir)))
-        self.assertTrue(os.path.exists(launch_agy.rules_path(self.sdir)))
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir, "navigator")), launch_agy.build_profile(self.meta, "navigator"))
+        self.assertTrue(os.path.exists(launch_agy.hooks_path(self.sdir, "navigator")))
+        self.assertTrue(os.path.exists(launch_agy.rules_path(self.sdir, "navigator")))
         launch_agy.write_session_files(self.meta, "driver")
-        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"], [])
-        self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir)), protocol.render(self.meta, "agy", "driver"))
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir, "driver"))["permissions"]["deny"], [])
+        self.assertEqual(self.read_text(launch_agy.rules_path(self.sdir, "driver")), protocol.render(self.meta, "agy", "driver"))
 
 
 class UserDenyTest(AgyFilesTestCase):
@@ -289,7 +302,7 @@ class UserDenyTest(AgyFilesTestCase):
         self.assertEqual(self.deny("navigator"), ["write_file(*)", "command(rm -rf)"])
         self.assertEqual(self.deny("driver"), ["command(rm -rf)"])
         launch_agy.write_session_files(self.meta, "navigator")
-        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir))["permissions"]["deny"], ["write_file(*)", "command(rm -rf)"])
+        self.assertEqual(self.read_json(launch_agy.profile_path(self.sdir, "navigator"))["permissions"]["deny"], ["write_file(*)", "command(rm -rf)"])
 
     def test_user_allow_is_not_carried_over(self):
         self.write_settings({"permissions": {"allow": ["command(ls)"], "deny": []}})

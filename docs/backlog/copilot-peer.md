@@ -22,7 +22,7 @@ What a `tandem copilot` launcher needs from the harness, none of it probed yet:
 - **Hooks for the logs**: a prompt-submit or equivalent hook for the human-input log.
 
 Start with a probe of the installed Copilot CLI against that list, recorded in `docs/probes/`.
-A pair is still one of each harness, so Copilot plus Claude or Copilot plus agy fits the existing
-peer-keyed claims: `DEFAULT_ROLES` names only Claude and agy, so Copilot holds no role until it
-launches with `--role`, and `claim_role` then replaces the idle default holder. Making Copilot a
-default would need `init` to pick the pair. Two Copilots is `same-harness-pair.md`.
+Copilot plus Claude or Copilot plus agy fits the role-keyed claims: `DEFAULT_ROLES` names only
+Claude and agy, so Copilot holds no role until it launches with `--role`, and `claim_role` then
+replaces the idle default holder. Making Copilot a default would need `init` to pick the pair. Two
+Copilots would work like two agys, given hooks that see `TANDEM_ROLE`.

@@ -108,7 +108,7 @@ tandem claude [--role driver|navigator] [-- <claude arguments>]
 
 | Option | Meaning |
 |---|---|
-| `--role` | Role to take. Default: the role the session gives Claude (driver, unless roles were flipped). Taking the other peer's role swaps the two, unless that peer is running; quit it first. |
+| `--role` | Role to take. Default: the role the session gives Claude (driver, unless roles were flipped). A role a running harness holds is refused; quit it first. Taking the other peer's role swaps the two, unless this Claude is already running in its role: then this launch makes a [Claude pair](#two-of-the-same-harness). |
 | `-- …` | Anything after `--` goes to `claude` as is, e.g. `tandem claude -- --model opus`. |
 
 Starts `claude` in this terminal with the session's protocol, hooks and permissions, and an opening
@@ -122,7 +122,7 @@ tandem agy [--role navigator|driver] [-- <agy arguments>]
 
 | Option | Meaning |
 |---|---|
-| `--role` | Role to take. Default: the role the session gives agy (navigator, unless roles were flipped). |
+| `--role` | Role to take. Default: the role the session gives agy (navigator, unless roles were flipped). The same rules as `tandem claude --role`; a second agy makes an [agy pair](#two-of-the-same-harness). |
 | `-- …` | Anything after `--` goes to `agy` as is, e.g. `tandem agy -- --model <name>`. |
 
 It needs agy 1.5.6 or later: an older agy is refused with a pointer to `agy update`, and a version
@@ -137,6 +137,21 @@ What agy may do without asking:
   `tandem write gate: …`. Its file-writing tool is denied.
 - **As driver**: `accept-edits` mode (file edits don't ask), plus the tandem commands, the test
   commands (through `tandem test`) and git. Other commands ask.
+
+### Two of the same harness
+
+Both roles can run the same harness: two agys, or two Claudes. Launch the first, then the second
+in another pane while the first runs:
+
+```sh
+tandem agy --role driver                        # pane 1
+tandem agy --role navigator -- --model <name>   # pane 2
+```
+
+The second launch says the session is now a pair. Each harness keeps its own config in
+`peers/<role>/`, and the navigator's write gate and permissions apply as usual. Relaunching one
+later needs its `--role`, unless the other one is running. A same-model pair loses most of the
+second opinion two model families give, so a different `--model` per role is worth it.
 
 ### `tandem human`: talk to the pair
 
@@ -239,7 +254,8 @@ For example, `instructions/driver.md` with "Before the final review, run `dip ru
 - **Quitting a harness** releases its role; relaunch it with the same command. agy's watcher stops
   by itself when agy exits, and the next agy launch starts a new one.
 - **Flipping roles mid-task**: quit both, then `tandem agy --role driver` and
-  `tandem claude --role navigator`.
+  `tandem claude --role navigator`. Quit both first: with agy still running as navigator,
+  `tandem agy --role driver` makes an [agy pair](#two-of-the-same-harness) instead of flipping.
 - **"waiting for the test lock"** in a test run: the other agent's tests are running, and this run
   starts when they finish. If it waits on a run that hangs, stop that run in the other console.
   The lock is per session: sessions in other worktrees that share a test database can still
@@ -257,9 +273,10 @@ show the path):
 | File | What it tells you |
 |---|---|
 | `log.jsonl` (`tandem log`) | every message, console input and event; the `agy_profile` event records agy's role and version at launch |
-| `peers/<claude\|agy>/hooks.log` | one line per hook failure; empty is good |
+| `peers/<role>/hooks.log` | one line per hook failure; empty is good |
 | `peers/<role>/watch.log` | agy's watcher: start, which agy process it serves, each ring, failures, why it exited |
 | `peers/<role>/watch.pid` | the running watcher's pid |
+| `peers/<role>/` | the config the harness in that role launched with: Claude's `settings.json` and `protocol.md`, agy's `profile.json` and `.agents/` |
 | `test.holder` | the test run holding the test lock (role, command, pid, start); gone when none runs |
 | `checkpoint` | the commit the last `review_request` named, the parent of the next `--snapshot` |
 | `summary.md` | written by `tandem done` |

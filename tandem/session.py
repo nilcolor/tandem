@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import unicodedata
 
 from tandem import TandemError, paths
@@ -116,9 +117,12 @@ def session_path(dir_name):
     return os.path.join(paths.sessions_dir(), dir_name)
 
 
-def peer_dir(sdir, name):
-    """`peers/<name>/` of a session: a peer's generated config, or a role's watcher state."""
-    return os.path.join(sdir, "peers", name)
+def peer_dir(sdir, role):
+    """`peers/<role>/` of a session: the generated config and watcher state of the harness in `role`.
+
+    Keyed by role, not by harness, so two harnesses of one kind can pair.
+    """
+    return os.path.join(sdir, "peers", role)
 
 
 def load_session(dir_name):
@@ -709,23 +713,55 @@ def run_done(args):
     return 0
 
 
+def roles_of(meta, peer):
+    """The pair roles `peer` holds in `meta`'s session: none, one, or both in a same-harness pair."""
+    return [role for role in PAIR_ROLES if meta["roles"].get(role) == peer]
+
+
 def role_of(meta, peer):
-    """The pair role `peer` holds in `meta`'s session, or None."""
-    roles = meta["roles"]
-    for role in PAIR_ROLES:
-        if roles.get(role) == peer:
-            return role
-    return None
+    """The one pair role `peer` holds, or None when it holds none or both."""
+    held = roles_of(meta, peer)
+    return held[0] if len(held) == 1 else None
 
 
-def live_claim(meta, peer):
-    """`peer`'s claim record while the process that made it still runs, else None.
+def env_role(meta, peer, environ=None):
+    """The role a running `peer` acts as: `TANDEM_ROLE` when `peer` holds it, else `role_of`.
+
+    The launcher exports `TANDEM_ROLE`, and in a same-harness pair it's the only thing that tells
+    the two harnesses apart.
+    """
+    environ = os.environ if environ is None else environ
+    role = environ.get("TANDEM_ROLE")
+    if role in PAIR_ROLES and meta["roles"].get(role) == peer:
+        return role
+    return role_of(meta, peer)
+
+
+def claims(meta):
+    """session.json's role claims, keyed by role.
+
+    Sessions from before same-harness pairs keyed them by peer, as `{peer: {role, pid, ts}}`;
+    those are read as role claims, and a role-keyed entry wins over one.
+    """
+    found = {}
+    for key, claim in (meta.get("claims") or {}).items():
+        if not isinstance(claim, dict):
+            continue
+        if key in PAIR_ROLES:
+            found[key] = claim
+        elif claim.get("role") in PAIR_ROLES and claim["role"] not in found:
+            found[claim["role"]] = {"peer": key, "pid": claim.get("pid"), "ts": claim.get("ts")}
+    return found
+
+
+def live_claim(meta, role):
+    """The claim on `role` while the process that made it still runs, else None.
 
     A launcher claims with its own pid and then execs the harness, which keeps
     that pid, so a claim lasts exactly as long as the harness does.
     """
-    claim = (meta.get("claims") or {}).get(peer)
-    if not isinstance(claim, dict):
+    claim = claims(meta).get(role)
+    if not isinstance(claim, dict) or claim.get("peer") != meta["roles"].get(role):
         return None
     pid = claim.get("pid")
     if not valid_pid(pid) or not pid_alive(pid):
@@ -733,11 +769,38 @@ def live_claim(meta, peer):
     return claim
 
 
-def claim_role(dir_name, peer, role=None, pid=None):
-    """Make `peer` hold `role` (default: the role it holds now); returns the updated session.json.
+def _running_claim(meta, role, pid):
+    """The live claim on `role` by another process; `pid`'s own earlier claim doesn't count."""
+    claim = live_claim(meta, role)
+    return claim if claim is not None and claim["pid"] != pid else None
 
-    Taking the other peer's role swaps the two, unless that peer is running
-    under a live claim of it. Shared by both launchers.
+
+def _default_role(meta, peer, pid):
+    held = roles_of(meta, peer)
+    if not held:
+        raise TandemError("%s holds no role in session %s; pass --role driver|navigator" % (peer, meta["dir"]))
+    free = [role for role in held if _running_claim(meta, role, pid) is None]
+    if len(free) == 1:
+        return free[0]
+    if free:
+        raise TandemError("%s holds both roles in session %s; pass --role driver|navigator" % (peer, meta["dir"]))
+    if len(held) == 1:
+        other = PAIR_ROLES[1 - PAIR_ROLES.index(held[0])]
+        raise TandemError(
+            "%s is already the %s in session %s (pid %d); pass --role %s to run a second %s as the %s"
+            % (peer, held[0], meta["dir"], _running_claim(meta, held[0], pid)["pid"], other, peer, other)
+        )
+    raise TandemError("%s already holds both roles in session %s, and both are running" % (peer, meta["dir"]))
+
+
+def claim_role(dir_name, peer, role=None, pid=None):
+    """Make `peer` hold `role` (default: the one it holds and isn't running in); returns
+    (session.json, role).
+
+    A running harness keeps its role: taking a role that has a live claim is refused, whichever
+    peer holds it. Otherwise taking the other peer's role swaps the two, unless `peer` is running
+    in the role it holds now; then it keeps that one too and the session becomes a same-harness
+    pair. Shared by both launchers.
     """
     if role is not None and role not in PAIR_ROLES:
         raise TandemError("role must be one of %s, not %r" % (", ".join(PAIR_ROLES), role))
@@ -749,31 +812,42 @@ def claim_role(dir_name, peer, role=None, pid=None):
             raise TandemError("session %s no longer exists" % dir_name)
         if not is_active(meta):
             raise TandemError("session %s has ended; run `tandem init` to start a new one" % dir_name)
+        role = role or _default_role(meta, peer, pid)
         roles = dict(meta["roles"])
-        held = role_of(meta, peer)
-        role = role or held
-        if role is None:
-            raise TandemError("%s holds no role in session %s; pass --role driver|navigator" % (peer, dir_name))
         holder = roles.get(role)
+        # Taking a running harness's role would leave it on the wrong protocol.
+        claim = _running_claim(meta, role, pid)
+        if claim is not None:
+            raise TandemError(
+                "%s is already the %s in session %s (pid %d); quit it first or pick the other role"
+                % (holder, role, dir_name, claim["pid"])
+            )
+        was = {}
         if holder != peer:
-            # Swapping a running peer's role would leave its harness on the wrong protocol.
-            claim = live_claim(meta, holder) if holder else None
-            if claim is not None:
-                raise TandemError(
-                    "%s is already the %s in session %s (pid %d); quit it first or pick the other role"
-                    % (holder, role, dir_name, claim["pid"])
-                )
             roles[role] = peer
-            if held is not None:
+            held = role_of(meta, peer)
+            if held is not None and _running_claim(meta, held, pid) is None:
                 roles[held] = holder
-        claims = dict(meta.get("claims") or {})
-        claims[peer] = {"role": role, "pid": pid, "ts": now_iso()}
+                was = {"was": held}
+        current = {r: c for r, c in claims(meta).items() if c.get("peer") == roles.get(r)}
+        current[role] = {"peer": peer, "pid": pid, "ts": now_iso()}
         meta["roles"] = roles
-        meta["claims"] = claims
+        meta["claims"] = current
         save_session(meta)
-        was = {"was": held} if held is not None and held != role else {}
-        write_log_line(sdir, event_record("role_claimed", ts=claims[peer]["ts"], peer=peer, role=role, **was))
-    return meta
+        write_log_line(sdir, event_record("role_claimed", ts=current[role]["ts"], peer=peer, role=role, **was))
+    return meta, role
+
+
+def claim_for_launch(dir_name, peer, role=None, err=None):
+    """`claim_role` for a launcher, saying so when the claim made the session a same-harness pair."""
+    meta, role = claim_role(dir_name, peer, role)
+    if len(roles_of(meta, peer)) == 2:
+        other = PAIR_ROLES[1 - PAIR_ROLES.index(role)]
+        note = "tandem: %s is the %s and the %s in session %s" % (peer, role, other, dir_name)
+        if not live_claim(meta, other):
+            note += "; launch the %s with `tandem %s --role %s`" % (other, peer, other)
+        print(note, file=err or sys.stderr)
+    return meta, role
 
 
 def harness_extra(args, example):

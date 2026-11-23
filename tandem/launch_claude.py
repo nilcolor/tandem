@@ -12,12 +12,12 @@ WAIT_DEADLINE = STOP_TIMEOUT - 60
 NAVIGATOR_DENY = ["Edit", "Write", "NotebookEdit"]
 
 
-def settings_path(sdir):
-    return os.path.join(session.peer_dir(sdir, PEER), "settings.json")
+def settings_path(sdir, role):
+    return os.path.join(session.peer_dir(sdir, role), "settings.json")
 
 
-def protocol_path(sdir):
-    return os.path.join(session.peer_dir(sdir, PEER), "protocol.md")
+def protocol_path(sdir, role):
+    return os.path.join(session.peer_dir(sdir, role), "protocol.md")
 
 
 def build_settings(meta, role):
@@ -43,26 +43,25 @@ def build_settings(meta, role):
 
 def prepare(meta, role=None, extra=()):
     """Claim the role, write the session's Claude config; returns (argv, env, cwd) to exec."""
-    meta = session.claim_role(meta["dir"], PEER, role)
-    role = protocol.peer_role(meta, PEER)
+    meta, role = session.claim_for_launch(meta["dir"], PEER, role)
     sdir = session.session_path(meta["dir"])
-    os.makedirs(session.peer_dir(sdir, PEER), exist_ok=True)
-    session.write_json_atomic(settings_path(sdir), build_settings(meta, role))
+    os.makedirs(session.peer_dir(sdir, role), exist_ok=True)
+    session.write_json_atomic(settings_path(sdir, role), build_settings(meta, role))
     text = protocol.render(meta, PEER, role)
-    session.write_text_atomic(protocol_path(sdir), text)
+    session.write_text_atomic(protocol_path(sdir, role), text)
     protocol.write_guides(sdir)
 
     # --add-dir lets Claude read (and, as driver, write) plan.md, decisions.md and reviews
     # in the session dir without a prompt. It takes several values, so it is followed by
     # another option, and `--` keeps a variadic option in `extra` from eating the prompt.
-    argv = ["claude", "--add-dir", sdir, "--settings", settings_path(sdir), "--append-system-prompt", text]
+    argv = ["claude", "--add-dir", sdir, "--settings", settings_path(sdir, role), "--append-system-prompt", text]
     argv += list(extra)
     argv += ["--", protocol.initial_prompt(meta, role)]
     return argv, session.harness_env(meta, role), meta["repo"]
 
 
 def configure_claude(p):
-    p.add_argument("--role", choices=session.PAIR_ROLES, help="role to claim (default: the one session.json gives claude)")
+    p.add_argument("--role", choices=session.PAIR_ROLES, help="role to claim (default: the one claude holds and isn't running in)")
     p.add_argument("extra", nargs=argparse.REMAINDER, help="after --: arguments passed to claude as they are")
 
 

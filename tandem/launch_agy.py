@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -24,20 +25,29 @@ MIN_AGY_VERSION = (1, 5, 6)
 VERSION_TIMEOUT = 30
 
 
-def profile_path(sdir):
-    return os.path.join(session.peer_dir(sdir, PEER), "profile.json")
+def profile_path(sdir, role):
+    return os.path.join(session.peer_dir(sdir, role), "profile.json")
 
 
-def agents_dir(sdir):
+def agents_dir(sdir, role):
+    """In the role's own dir, passed as a second `--add-dir`: agy re-reads its rules every turn, so
+    one `.agents/` at the session dir root would hand the first of two agys the second one's
+    protocol, and a nested `.agents/` isn't discovered from the session dir (docs/probes
+    2026-11-23 two instances)."""
+    return os.path.join(session.peer_dir(sdir, role), ".agents")
+
+
+def legacy_agents_dir(sdir):
+    """Where sessions before same-harness pairs kept `.agents/`; both agys would load it."""
     return os.path.join(sdir, ".agents")
 
 
-def hooks_path(sdir):
-    return os.path.join(agents_dir(sdir), "hooks.json")
+def hooks_path(sdir, role):
+    return os.path.join(agents_dir(sdir, role), "hooks.json")
 
 
-def rules_path(sdir):
-    return os.path.join(agents_dir(sdir), "rules", "AGENTS.md")
+def rules_path(sdir, role):
+    return os.path.join(agents_dir(sdir, role), "rules", "AGENTS.md")
 
 
 def build_hooks(meta):
@@ -96,8 +106,8 @@ def session_file_writes(meta):
 def build_profile(meta, role):
     """The `--settings` profile for agy as `role`.
 
-    Both keep the sandbox off and terminal commands under review, whatever the user's global
-    settings say, so the allowlist decides what runs unasked. `--settings` replaces
+    Both keep the Default mode, the sandbox off and terminal commands under review, whatever the
+    user's global settings say, so the allowlist decides what runs unasked. `--settings` replaces
     `permissions.allow` and `permissions.deny` separately, so both are always written: an omitted
     key would keep the user's global list. A written `deny` replaces the user's global deny too,
     so theirs is carried over after tandem's own.
@@ -110,6 +120,11 @@ def build_profile(meta, role):
         allow = ["command(%s)" % p for p in dict.fromkeys(prefixes + read_only_git(meta["repo"]))]
         deny = list(DENY_FILE_TOOL)
     return {
+        # Auto has been agy's default mode since 1.5.7, even with the sandbox off (docs/probes
+        # 2026-11-23 pair live check): it sandboxes commands and lets its reviewer approve ones
+        # off the allowlist.
+        # "" is the Default mode, as `/config` saves it; the driver's `--mode` overrides it.
+        "agentMode": "",
         "toolPermission": "request-review",
         "enableTerminalSandbox": False,
         "permissions": {"allow": allow, "deny": list(dict.fromkeys(deny + user_deny()))},
@@ -117,8 +132,8 @@ def build_profile(meta, role):
 
 
 def write_profile(meta, role):
-    """Write the profile for `role` to peers/agy/profile.json; returns the path."""
-    path = profile_path(session.session_path(meta["dir"]))
+    """Write the profile for `role` to peers/<role>/profile.json; returns the path."""
+    path = profile_path(session.session_path(meta["dir"]), role)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     session.write_json_atomic(path, build_profile(meta, role))
     return path
@@ -133,13 +148,15 @@ def render_rules(meta, role):
 
 
 def write_agents_dir(meta, role):
-    """Write `.agents/hooks.json` and `.agents/rules/AGENTS.md`, which agy loads via `--add-dir`."""
+    """Write the role's `.agents/hooks.json` and `.agents/rules/AGENTS.md`, which agy loads via
+    `--add-dir`."""
     sdir = session.session_path(meta["dir"])
     text = render_rules(meta, role)
-    os.makedirs(os.path.dirname(rules_path(sdir)), exist_ok=True)
-    session.write_json_atomic(hooks_path(sdir), build_hooks(meta))
-    session.write_text_atomic(rules_path(sdir), text)
-    return agents_dir(sdir)
+    os.makedirs(os.path.dirname(rules_path(sdir, role)), exist_ok=True)
+    session.write_json_atomic(hooks_path(sdir, role), build_hooks(meta))
+    session.write_text_atomic(rules_path(sdir, role), text)
+    shutil.rmtree(legacy_agents_dir(sdir), ignore_errors=True)
+    return agents_dir(sdir, role)
 
 
 def write_session_files(meta, role):
@@ -208,13 +225,15 @@ def initial_prompt(meta, role):
 def prepare(meta, role=None, extra=()):
     """Check agy, claim the role, write the session's agy files; returns (argv, env, cwd) to exec."""
     version = require_agy_version()
-    meta = session.claim_role(meta["dir"], PEER, role)
-    role = protocol.peer_role(meta, PEER)
+    meta, role = session.claim_for_launch(meta["dir"], PEER, role)
     sdir = session.session_path(meta["dir"])
     write_session_files(meta, role)
     session.log_event(sdir, "agy_profile", profile=role, version=version)
 
-    argv = ["agy", "--settings", profile_path(sdir), "--add-dir", sdir]
+    # The session dir goes last: agy's commands start in the last `--add-dir`, and the protocol
+    # tells agy they start in the session dir.
+    argv = ["agy", "--settings", profile_path(sdir, role)]
+    argv += ["--add-dir", session.peer_dir(sdir, role), "--add-dir", sdir]
     if role == "driver":
         argv += ["--mode", DRIVER_MODE]
     argv.append("--prompt-interactive=%s" % initial_prompt(meta, role))
@@ -223,7 +242,7 @@ def prepare(meta, role=None, extra=()):
 
 
 def configure_agy(p):
-    p.add_argument("--role", choices=session.PAIR_ROLES, help="role to claim (default: the one session.json gives agy)")
+    p.add_argument("--role", choices=session.PAIR_ROLES, help="role to claim (default: the one agy holds and isn't running in)")
     p.add_argument("extra", nargs=argparse.REMAINDER, help="after --: arguments passed to agy as they are")
 
 

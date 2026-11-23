@@ -437,7 +437,7 @@ class InitErrorsAndReplaceTest(InitTestCase):
         with mock.patch.object(session, "_allocate_dir", side_effect=allocate):
             self.init_ok("second", "--replace")
         old = session.load_session("repo--first")
-        self.assertEqual(old["claims"]["claude"]["pid"], 4242)
+        self.assertEqual(old["claims"]["driver"]["pid"], 4242)
         self.assertEqual(old["replaced_by"], "repo--second")
 
     def test_replace_of_a_session_ended_meanwhile(self):

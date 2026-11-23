@@ -38,7 +38,7 @@ class ClaudePromptTestCase(TandemTestCase):
 
     def hooks_log(self):
         try:
-            with open(hooks.hooks_log_path(self.sdir, "claude"), encoding="utf-8") as f:
+            with open(hooks.hooks_log_path(self.sdir, "driver"), encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
             return ""
@@ -76,7 +76,7 @@ class NormalPromptTest(ClaudePromptTestCase):
         self.assert_quiet(self.hook(payload("look at the tests first")))
         self.assertEqual(self.consoles()[0]["to"], "navigator")
 
-    def test_role_read_at_hook_time_not_from_env(self):
+    def test_env_role_the_session_contradicts_is_ignored(self):
         os.environ["TANDEM_ROLE"] = "driver"
         self.set_roles(driver="agy", navigator="claude")
         self.hook(payload("x"))
@@ -251,9 +251,11 @@ class EndedOrMissingSessionTest(ClaudePromptTestCase):
 
     def test_claude_holds_no_role(self):
         self.set_roles(driver="agy", navigator="someone-else")
-        self.assert_quiet(self.hook(payload("x")))
+        result = self.hook(payload("x"))
+        self.assert_quiet(result)
         self.assertEqual(self.consoles(), [])
-        self.assertIn("claude holds no role", self.hooks_log())
+        # No role, so no peers/<role>/ to log into.
+        self.assertIn("can't tell which role this claude holds", result[2])
 
 
 class FailureIsolationTest(ClaudePromptTestCase):
@@ -276,7 +278,7 @@ class FailureIsolationTest(ClaudePromptTestCase):
 
     def test_hooks_log_unwritable_falls_back_to_stderr(self):
         peers = os.path.join(self.sdir, "peers")
-        with open(os.path.join(peers, "claude"), "w") as f:
+        with open(os.path.join(peers, "driver"), "w") as f:
             f.write("not a dir")
         code, out, err = self.hook("not json")
         self.assertEqual((code, out), (0, ""))
