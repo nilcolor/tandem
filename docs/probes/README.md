@@ -14,3 +14,4 @@ here for the evidence. A new agy or Claude release that needs re-checking gets a
 | [2026-11-11-agy-1.5.5-live-probe.md](2026-11-11-agy-1.5.5-live-probe.md) | `unsandboxed(...)` still works on 1.5.5; the workspace is writable in the sandbox |
 | [2026-11-11-claude-permission-rules.md](2026-11-11-claude-permission-rules.md) | Claude Code permission rule syntax (from the docs) |
 | [2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md](2026-11-12-agy-1.5.6-claude-2.1.322-live-check.md) | the end-to-end live check (plan Task 17): 1.5.6 dropped `unsandboxed(...)`, and the fixes that followed |
+| [2026-11-23-claude-2.1.330-subagent-deny.md](2026-11-23-claude-2.1.330-subagent-deny.md) | a subagent keeps the navigator's `--settings` deny of Edit, Write and NotebookEdit |

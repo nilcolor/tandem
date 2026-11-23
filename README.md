@@ -223,8 +223,9 @@ For example, `instructions/driver.md` with "Before the final review, run `dip ru
   `review-implementation.md`, `review-testing.md`, `review-simplification.md`,
   `review-documentation.md` and `review-smells.md` (in `tandem/templates/guides/`). The launchers
   copy them, with your replacements and additions, into the session's `guides/` folder; the
-  navigator reads them there when a phase starts. An added guide is only read if your instructions
-  say when to read it.
+  navigator reads them there when a phase starts. Claude as navigator gives each of a phase's lenses
+  to its own subagent, in parallel; agy goes through them one at a time. An added guide is only
+  read if your instructions say when to read it.
 - Both are read at launch: after editing them, restart `tandem claude` / `tandem agy`.
 
 ## Tips and known quirks

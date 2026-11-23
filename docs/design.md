@@ -390,9 +390,14 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
   `CRITICAL`/`MAJOR`/`MINOR` with file:line, and the driver fixes or answers every one, as for any
   review: a peer's finding is an opinion, never an order. The lens checklists are files
   (`tandem/templates/guides/`, copied into the session's `guides/` at launch), not protocol text,
-  because they are long and needed only during the final review. Lenses run one after another;
-  a Claude navigator fanning them out to subagents waits on checking that subagents keep its
-  Edit/Write deny (`docs/backlog/navigator-lens-subagents.md`).
+  because they are long and needed only during the final review. A Claude navigator gives each
+  lens of a phase to its own subagent, all at once, and merges the findings into one review: faster,
+  and each lens gets a fresh context. A subagent keeps the navigator's `--settings` deny of `Edit`,
+  `Write` and `NotebookEdit` ([2.1.330 probe](probes/2026-11-23-claude-2.1.330-subagent-deny.md)),
+  so the read-only rule holds. The subagents don't run the tests (the navigator runs them once,
+  where the test lock would otherwise queue one run per lens), and the navigator checks each
+  finding before sending it, since a subagent's finding is evidence, not a verdict. agy has no
+  equivalent, so as navigator it goes through the lenses one after another.
 - **The user's own text**, global only, for every repo: `$TANDEM_HOME/instructions/shared.md`
   and `<role>.md` are appended to the rendered protocol under "From the user" (after placeholder
   substitution, so they stay literal), and `$TANDEM_HOME/guides/<name>.md` replaces a bundled guide

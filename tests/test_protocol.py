@@ -151,6 +151,8 @@ class RenderTest(ProtocolTestCase):
             self.assertIn('`Stop hook blocking error from command "Stop": %s`' % watch.doorbell(role), text)
             self.assertIn("not an error", text)
             self.assertNotIn("--detach", text)
+            self.assertIn("As navigator, in a final review phase with two or more lenses", text)
+            self.assertIn("`general-purpose` subagent", text)
 
     def test_agy_section(self):
         for role in ("driver", "navigator"):
@@ -160,6 +162,7 @@ class RenderTest(ProtocolTestCase):
             self.assertIn("SYSTEM_MESSAGE", text)
             self.assertIn("    tandem watch --as %s --detach\n" % role, text)
             self.assertNotIn("Stop hook blocking error", text)
+            self.assertNotIn("subagent", text)
 
     def test_session_values(self):
         text = protocol.render(self.meta_for("navigator", "agy"), "agy")

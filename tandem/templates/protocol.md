@@ -156,7 +156,7 @@ behaviour without a test, a broken contract) or `MINOR` (everything else), with 
   rather than blocking on it.
 - Don't review work in progress. After a review, you may read ahead for the plan's next step.
 - Final review: read the phase's lens files first, every time, then go through the lenses one at a
-  time. Reply with one review: `APPROVE` or `CHANGES`, then the findings grouped by lens, each
+  time, or in parallel where your harness section says how. Reply with one review: `APPROVE` or `CHANGES`, then the findings grouped by lens, each
   tagged and with file:line. Say so for a lens with nothing to report. With only MINOR findings,
   answer `APPROVE` and list them: the driver fixes them without a re-check.
 
@@ -168,6 +168,12 @@ behaviour without a test, a broken contract) or `MINOR` (everything else), with 
   doorbell. Run `tandem recv`.
 - The waiter that rings it arms each time you end a turn, so end your turn while you wait for your
   peer.
+- As navigator, in a final review phase with two or more lenses, give each lens to its own
+  `general-purpose` subagent (Agent tool), all started at once. Tell each one the lens file's path,
+  the phase's scope, the finding tags and to report findings with file:line, not to fix them. They
+  keep your permissions, so they can't edit either. They don't run the tests: run them yourself,
+  once, while they work. Check each finding against the code before you use it, then send one
+  review grouped by lens.
 
 <!-- tandem: peer agy -->
 ## Your harness: agy
