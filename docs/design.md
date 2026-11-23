@@ -408,44 +408,41 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
   approve. At most 3 rounds per item, then `escalate` to `human` with both positions. "Loop until
   agreed" is rejected because LLMs cave or loop.
 - **Checkpointed review**, per plan step, not continuous parallel review that chases a moving tree.
-  Trivial changes skip review and are listed in the next `review_request`.
-- **Pipelined checkpoints, a window of one.** The driver starts the next step as soon as it sends a
-  `review_request`, and never starts a step with two checkpoints unreviewed: with the next step
-  done and the review not in, it ends its turn and waits. On two live sessions the driver spent
-  about 45% of the implement phase waiting on reviews of 4 to 23 minutes. A wider window is
-  rejected: a `CHANGES` verdict means rework under everything built since. The plan and the final
-  review phases stay sequential, since there is nothing to build ahead of them. After `CHANGES`, the
-  driver fixes first when the fixes change what the step in progress builds on, else finishes the
-  step; the next `review_request` lists the fixes apart from the new step. A Claude driver hears
-  the doorbell only when its turn ends, so the protocol has it run `tandem recv` after each test
-  run and at the end of each step.
-- **The checkpoint is a frozen commit.** The working tree moves on during the review, so the
-  navigator reviews `git show <rev>`: a commit when the user allows commits, else
-  `tandem send --snapshot`, which builds a commit of the working tree (untracked files too, ignored
-  ones not) in a throwaway copy of the index with `commit-tree`. HEAD, the index, branches and refs
-  don't change; the repo only gains objects, which `git gc` prunes after its two-week default. Its
-  parent is the last checkpoint (`<session dir>/checkpoint`, set by each `review_request` that names
-  a commit, falling back to HEAD), so `git show` is exactly the step. A fixed identity and
-  `--no-gpg-sign` keep it from failing where no identity is configured or from waiting on a signing
-  prompt. Rejected: `git stash create`, which leaves untracked files out; a patch file in the
-  session dir, which `git show`/`git diff` can't read; a ref under `refs/tandem/`, which would
-  write into the user's repo. The navigator's own test runs still see the moving tree: a failure in
-  code the checkpoint doesn't touch may be the step in progress, and the protocol has it say so
-  instead of blocking. A worktree at the snapshot was rejected for that: it lacks the ignored files
-  the tests need (`.env`, `node_modules`, credentials) and, under docker compose, is another
-  project.
+  Trivial changes skip review and are listed in the next `review_request`. The driver waits for
+  each review before the next step.
+- **Pipelined checkpoints, rejected.** The driver starting the next step while a checkpoint is in
+  review, at most one checkpoint ahead, was built and rolled back. On two live sessions the driver
+  spent about 45% of the implement phase waiting on reviews of 4 to 23 minutes, but the navigator's
+  own test runs are its evidence, and with the next step in the working tree they test a tree the
+  checkpoint isn't. In a Rails repo a migration added by the next step fails every navigator run
+  as pending, or changes the shared test schema under the checkpoint's specs, which no test lock
+  prevents. A worktree at the checkpoint for the navigator's runs was rejected too: it lacks the
+  ignored files the tests need (`.env`, `node_modules`, credentials) and, under docker compose, is
+  another project.
+- **The checkpoint names a commit.** `git show <rev>` is the step: a commit when the user allows
+  commits, else `tandem send --snapshot`, which builds a commit of the working tree (untracked
+  files too, ignored ones not) in a throwaway copy of the index with `commit-tree`, so the driver
+  needn't stage reviewed steps to keep `git diff` to the latest one. HEAD, the index, branches and
+  refs don't change; the repo only gains objects, which `git gc` prunes after its two-week default.
+  Its parent is the last checkpoint (`<session dir>/checkpoint`, set by each `review_request` that
+  names a commit, falling back to HEAD). A fixed identity and `--no-gpg-sign` keep it from failing
+  where no identity is configured or from waiting on a signing prompt. Rejected: `git stash
+  create`, which leaves untracked files out; a patch file in the session dir, which `git show`/`git
+  diff` can't read; a ref under `refs/tandem/`, which would write into the user's repo.
 - **The test lock.** `tandem test <cmd>` runs a test command in the repo under an exclusive flock on
-  `<session dir>/test.lock`, so the two agents' runs never overlap: pipelining makes them
-  concurrent, and a shared test database then fails runs at random (in a live session two
-  overlapping runs failed 38 examples with "Table definition has changed"). A waiting run prints the holder from
-  `<session dir>/test.holder` (role, command, pid, start). tandem stays the parent and keeps the
-  lock fd to itself, since a daemon the tests spawn (spring, a compose service) would otherwise
-  inherit it and keep the lock past the run; it forwards SIGTERM and SIGHUP to the test process and
-  waits, so a harness killing a slow command doesn't leave the tests running unlocked. Only the
-  `tandem test` forms are allowlisted, so a bare test command asks the user, which keeps the agents
-  on the lock. Rejected: per-role test databases (`TEST_ENV_NUMBER`), repo setup tandem can't own;
-  a lock across sessions: tandem can't tell whether sessions in other worktrees share a database,
-  and the overlap pipelining adds is within one pair.
+  `<session dir>/test.lock`, so no two test runs in a session overlap: a driver's suite running in
+  the background, its own focused runs and the navigator's runs share a test database, and
+  overlapping runs fail at random (in a live session two of them failed 38 examples with "Table
+  definition has changed"). A waiting run prints the holder from `<session dir>/test.holder`
+  (role, command, pid, start). tandem stays the parent and keeps the lock fd to itself, since a
+  daemon the tests spawn (spring, a compose service) would otherwise inherit it and keep the lock
+  past the run; it forwards SIGTERM and SIGHUP to the test process and waits, so a harness killing
+  a slow command doesn't leave the tests running unlocked. Only the `tandem test` forms are
+  allowlisted, so a bare test command asks the user, which keeps the agents on the lock. Rejected:
+  per-role test databases (`TEST_ENV_NUMBER`), repo setup tandem can't own.
+- **The test lock is per session, by design.** Sessions in other worktrees of the same repo that
+  share a test database can still overlap. That is an accepted limitation: tandem can't tell which
+  sessions share a database, and a lock across all of them would serialize ones that don't.
 - A peer agreeing is never user approval. A reply is never promised: a model can ignore a message
   that arrived fine.
 - The shared rules never touch transport details. Only the per-peer section and launcher do, so

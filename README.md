@@ -9,9 +9,8 @@ A session goes like this:
 
 1. You give a task: a ticket key, a short brief, or just a first prompt to the driver.
 2. The driver writes a plan; the navigator reviews it. They agree, or escalate to you.
-3. The driver works in checkpoints. It goes on with the next step while the navigator reviews the
-   last one (from a frozen commit of it and its own test runs), but never gets two checkpoints
-   ahead.
+3. The driver works in checkpoints; the navigator reviews each one from a commit of it and its own
+   test runs.
 4. If the task changed code, the navigator reviews the whole change in three passes: one across
    every lens (quality, implementation, testing, simplification, documentation), one for code
    smells, and a last one for critical issues only. A task with no code change (a review, research)
@@ -242,6 +241,8 @@ For example, `instructions/driver.md` with "Before the final review, run `dip ru
   `tandem claude --role navigator`.
 - **"waiting for the test lock"** in a test run: the other agent's tests are running, and this run
   starts when they finish. If it waits on a run that hangs, stop that run in the other console.
+  The lock is per session: sessions in other worktrees that share a test database can still
+  overlap.
 - **Snapshots are dangling commits.** `--snapshot` adds objects to the repo but no ref, so nothing
   shows in `git log` or `git status`; `git gc` drops them after two weeks by default.
 - The agents' messages sometimes show a `tandem recv` as "failed" in agy: that's exit code 3, "no

@@ -364,7 +364,7 @@ class FinalReviewTest(ProtocolTestCase):
         navigator = protocol.render(self.meta_for("navigator", "agy"), "agy")
         self.assertIn("read the phase's lens files first", navigator)
         self.assertIn("grouped by lens", navigator)
-        self.assertIn("With only MINOR findings,\n  answer `APPROVE`", navigator)
+        self.assertIn("With only MINOR findings, answer `APPROVE`", navigator)
 
 
 class InstructionsTest(ProtocolTestCase):

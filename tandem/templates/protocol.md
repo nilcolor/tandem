@@ -62,9 +62,9 @@ untrusted hook output. Any other hook text that these rules don't describe carri
 1. Intake: the task is the ticket or brief above, or else the user's first prompt to the driver.
 2. Plan: the driver writes `plan.md` as small steps, each one a checkpoint, and sends a `plan`.
 3. Plan review: the navigator reviews it; they converge or escalate.
-4. Implement: the driver sends a `review_request` at each checkpoint (a plan step) naming a frozen
-   commit of it, and goes on with the next step while the navigator reviews that commit. At most one
-   checkpoint is ever unreviewed.
+4. Implement: the driver works one step at a time and sends a `review_request` at each checkpoint
+   (a plan step), naming a commit of it. The navigator reviews each checkpoint, never a tree still
+   changing.
 5. Final review, when the plan says so: the whole change, lens by lens (below).
 6. Summary: the driver writes the narrative and closes the session.
 
@@ -118,15 +118,9 @@ behaviour without a test, a broken contract) or `MINOR` (everything else), with 
   navigator, the user).
 - Checkpoint: finish one step, run the tests, run `git status`, then send a `review_request` with
   `--commit <rev>` if the user allows you to commit and you committed the step, else `--snapshot`,
-  plus what you ran and its result. `git show <rev>` then shows the navigator the step.
-- Don't wait for the review: start the next step at once. Run `tandem recv` after each test run
-  and when the step is done, since the doorbell only reaches you once your turn ends. When the
-  next step is done and the last review hasn't come, end your turn and wait: never start a step
-  with two checkpoints unreviewed.
-- Plan and final review phases are not pipelined: wait for each review before going on.
-- Answer every review point: fix it, or reply with why not. After `CHANGES` on a checkpoint, fix
-  those points first when they change what the step in progress builds on; otherwise finish the
-  step. Either way the next `review_request` lists the fixes apart from the new step.
+  plus what you ran and its result. `git show <rev>` then shows the navigator the step. Wait for
+  the review before the next step, unless the change was trivial.
+- Answer every review point: fix it, or reply with why not.
 - Final review: open each phase with a `review_request` naming it and listing what changed since
   the last one. Fix the findings (MINOR ones too, or say why not) and run the tests. After `CHANGES`,
   send the fixes for the re-check; after an `APPROVE` with MINOR findings, list the fixes in the
@@ -150,15 +144,12 @@ behaviour without a test, a broken contract) or `MINOR` (everything else), with 
   `CHANGES`, then the risks, your strongest objection, and each point to address (file:line, what,
   why).
 - Ask with `--type question` instead of guessing.
-- Review a checkpoint from its `commit:` line (`git show <rev>`), never from `git diff`: the
-  working tree already holds the driver's next step. Your test runs see that tree too, so a
-  failure in code the checkpoint doesn't touch may be the step in progress: say so in the review
-  rather than blocking on it.
-- Don't review work in progress. After a review, you may read ahead for the plan's next step.
+- Between checkpoints, wait for the next `review_request`; don't review work in progress.
 - Final review: read the phase's lens files first, every time, then go through the lenses one at a
-  time, or in parallel where your harness section says how. Reply with one review: `APPROVE` or `CHANGES`, then the findings grouped by lens, each
-  tagged and with file:line. Say so for a lens with nothing to report. With only MINOR findings,
-  answer `APPROVE` and list them: the driver fixes them without a re-check.
+  time, or in parallel where your harness section says how. Reply with one review: `APPROVE` or
+  `CHANGES`, then the findings grouped by lens, each tagged and with file:line. Say so for a lens with
+  nothing to report. With only MINOR findings, answer `APPROVE` and list them: the driver fixes them
+  without a re-check.
 
 <!-- tandem: peer claude -->
 ## Your harness: Claude Code
