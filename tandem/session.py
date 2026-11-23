@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import unicodedata
 
@@ -461,6 +462,12 @@ def configure_init(p):
 
 
 def run_init(args):
+    # Refused rather than taken as the name: everywhere else --session names an existing session.
+    if args.session:
+        raise TandemError(
+            "init takes the new session's name as an argument: tandem init %s "
+            "(--session picks an existing session)" % shlex.quote(args.session)
+        )
     meta = init_session(
         name=args.name,
         ticket=args.ticket,

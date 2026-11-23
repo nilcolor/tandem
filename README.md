@@ -76,7 +76,8 @@ The first time in a new repo each harness asks whether you trust the folder. Ans
 
 Run any command with `--help` for its options. Every command finds the session from the repo you're
 in; `--session NAME` (before the command: `tandem --session fix-csv-bom status`) picks one
-explicitly, by its short name or full directory name.
+explicitly, by its short name or full directory name. `init` refuses it: a new session's name is
+`init`'s own argument (`tandem init fix-csv-bom`).
 
 ### `tandem init`: start a session
 

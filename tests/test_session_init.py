@@ -344,6 +344,16 @@ class InitErrorsAndReplaceTest(InitTestCase):
         self.assertEqual(err, "tandem: not inside a git repository\n")
         self.assertFalse(os.path.exists(paths.tandem_home()))
 
+    def test_global_session_flag_is_refused(self):
+        code, out, err = self.run_cli("--session", "SE-2046 Code Review", "init")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(
+            err,
+            "tandem: init takes the new session's name as an argument: tandem init 'SE-2046 Code Review' "
+            "(--session picks an existing session)\n",
+        )
+        self.assertFalse(os.path.exists(paths.sessions_dir()))
+
     def test_git_missing(self):
         os.environ["PATH"] = os.path.join(self.tmp, "empty-bin")
         code, out, err = self.init()
