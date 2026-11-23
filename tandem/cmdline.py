@@ -282,6 +282,20 @@ def segments(toks):
     return found
 
 
+def _tandem_test_start(words, i):
+    """Index of the command `tandem [--session S] test [--] <command>` runs, or None.
+
+    `tandem test` runs whatever follows it, and its allow rules carry the test commands, so the
+    gate judges the wrapped command, as it does for `dip rubocop -A`.
+    """
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] == "--session" else 1
+    if i >= len(words) or words[i] != "test":
+        return None
+    i += 1
+    return i + 1 if i < len(words) and words[i] == "--" else i
+
+
 def _command(words):
     """(command name, its arguments), skipping assignments, keywords and wrappers."""
     i = 0
@@ -291,6 +305,11 @@ def _command(words):
             i += 1
             continue
         name = os.path.basename(w)
+        if name == "tandem":
+            wrapped = _tandem_test_start(words, i + 1)
+            if wrapped is not None:
+                i = wrapped
+                continue
         if name in _WRAPPERS:
             takes_value = _WRAPPER_VALUE_OPTS.get(name, ())
             i += 1

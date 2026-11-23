@@ -205,8 +205,9 @@ panes: the user runs each launcher in whatever terminal they like.
   `peers/agy/profile.json`, the navigator or driver profile ([Permissions](#permissions-autonomy-without-prompt-fatigue)).
   Nothing is installed globally and nothing is written into the target repo.
 - The test prefixes come from `session.json` `test_cmds` (detected at `init` or given with
-  `--test-cmd`; whitespace collapsed and duplicates dropped). One containing `(` or `)` is left out
-  of every rule set, since it would end a rule early.
+  `--test-cmd`; whitespace collapsed and duplicates dropped), each approved only as
+  `tandem test <cmd>` ([the test lock](#protocol-rules)). One containing `(` or `)` is left out of
+  every rule set, since it would end a rule early.
 - **Each agy profile's `deny` carries the user's own.** A `deny` in `--settings`, even `[]`, replaces
   the global one, so tandem writes its own deny rules followed by the user's global agy deny
   (`~/.gemini/antigravity-cli/settings.json` `permissions.deny`, read and never written,
@@ -325,7 +326,8 @@ Both keep agy's sandbox off and terminal commands under `request-review`, whatev
 settings say, so the allowlist decides what runs unasked.
 
 - **Navigator**: a tight allowlist: the protocol's tandem subcommands (`command(tandem send)` and so
-  on), the exact test commands (`command(dip rspec)`, never `command(dip)`), and read-only git
+  on), the exact test commands behind the test lock (`command(tandem test dip rspec)`, never
+  `command(dip)`, `command(dip rspec)` or `command(tandem test)`), and read-only git
   (`git status|diff|log|show`, and the same as `git -C <repo> …`, which agy reaches for on its own);
   `write_file(*)` denied, and the hook gating shell writes. Anything else prompts.
 - **Driver**: `--mode accept-edits` (`auto` would need the sandbox and silently fell back to the
@@ -357,15 +359,16 @@ settings say, so the allowlist decides what runs unasked.
   trip the gate, and every part is checked, including `$(…)`, backticks, subshells and each side of
   `;`/`&&`/`||`/`|`. `2>&1` and redirects to `/dev/null` aren't writes, read-only forms
   (`git stash list`, `git config --get`, `git remote -v`) aren't gated, and wrappers are skipped
-  with their option values (`sudo -u bob rm x` is `rm`). It's best effort: writes through
+  with their option values (`sudo -u bob rm x` is `rm`), and so is `tandem test`, which runs
+  whatever follows it: `tandem test dip rubocop -A` is gated as rubocop's. It's best effort: writes through
   `python3 -c` or a script can't all be spotted (`docs/backlog/agy-write-gate-misses-indirect-writes.md`),
   so `git status` stays the net. Rules live in `tandem/cmdline.py`.
 - Anything else → `{"decision":"ask"}`, the pass-through to agy's own rules. `{}` would deny.
 
 ### Claude
 
-A per-session settings file: `Bash(<prefix> *)` allowed for the role's tandem subcommands and the
-test commands, and for a navigator `Edit`, `Write` and `NotebookEdit` denied (a bare tool name in
+A per-session settings file: `Bash(<prefix> *)` allowed for the role's tandem subcommands and
+`tandem test <test command>`, and for a navigator `Edit`, `Write` and `NotebookEdit` denied (a bare tool name in
 `deny` removes the tool). Claude merges lists across scopes, so the user's own allow rules still
 apply ([permission rules](probes/2026-11-11-claude-permission-rules.md)). Its Bash isn't write-gated
 yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git status` check covers it.
@@ -399,10 +402,45 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
 - **Bounded consensus.** The navigator must state risks and its strongest objection before it can
   approve. At most 3 rounds per item, then `escalate` to `human` with both positions. "Loop until
   agreed" is rejected because LLMs cave or loop.
-- **Checkpointed review**, per plan step or commit, not continuous parallel review that chases a
-  moving tree. Trivial changes skip review and are listed in the next `review_request`. Pipelining
-  (the driver starting the next step while a checkpoint is in review) is still open
-  (`docs/backlog/pipelined-checkpoints.md`).
+- **Checkpointed review**, per plan step, not continuous parallel review that chases a moving tree.
+  Trivial changes skip review and are listed in the next `review_request`.
+- **Pipelined checkpoints, a window of one.** The driver starts the next step as soon as it sends a
+  `review_request`, and never starts a step with two checkpoints unreviewed: with the next step
+  done and the review not in, it ends its turn and waits. On two live sessions the driver spent
+  about 45% of the implement phase waiting on reviews of 4 to 23 minutes. A wider window is
+  rejected: a `CHANGES` verdict means rework under everything built since. The plan and the final
+  review phases stay sequential, since there is nothing to build ahead of them. After `CHANGES`, the
+  driver fixes first when the fixes change what the step in progress builds on, else finishes the
+  step; the next `review_request` lists the fixes apart from the new step. A Claude driver hears
+  the doorbell only when its turn ends, so the protocol has it run `tandem recv` after each test
+  run and at the end of each step.
+- **The checkpoint is a frozen commit.** The working tree moves on during the review, so the
+  navigator reviews `git show <rev>`: a commit when the user allows commits, else
+  `tandem send --snapshot`, which builds a commit of the working tree (untracked files too, ignored
+  ones not) in a throwaway copy of the index with `commit-tree`. HEAD, the index, branches and refs
+  don't change; the repo only gains objects, which `git gc` prunes after its two-week default. Its
+  parent is the last checkpoint (`<session dir>/checkpoint`, set by each `review_request` that names
+  a commit, falling back to HEAD), so `git show` is exactly the step. A fixed identity and
+  `--no-gpg-sign` keep it from failing where no identity is configured or from waiting on a signing
+  prompt. Rejected: `git stash create`, which leaves untracked files out; a patch file in the
+  session dir, which `git show`/`git diff` can't read; a ref under `refs/tandem/`, which would
+  write into the user's repo. The navigator's own test runs still see the moving tree: a failure in
+  code the checkpoint doesn't touch may be the step in progress, and the protocol has it say so
+  instead of blocking. A worktree at the snapshot was rejected for that: it lacks the ignored files
+  the tests need (`.env`, `node_modules`, credentials) and, under docker compose, is another
+  project.
+- **The test lock.** `tandem test <cmd>` runs a test command in the repo under an exclusive flock on
+  `<session dir>/test.lock`, so the two agents' runs never overlap: pipelining makes them
+  concurrent, and a shared test database then fails runs at random (in a live session two
+  overlapping runs failed 38 examples with "Table definition has changed"). A waiting run prints the holder from
+  `<session dir>/test.holder` (role, command, pid, start). tandem stays the parent and keeps the
+  lock fd to itself, since a daemon the tests spawn (spring, a compose service) would otherwise
+  inherit it and keep the lock past the run; it forwards SIGTERM and SIGHUP to the test process and
+  waits, so a harness killing a slow command doesn't leave the tests running unlocked. Only the
+  `tandem test` forms are allowlisted, so a bare test command asks the user, which keeps the agents
+  on the lock. Rejected: per-role test databases (`TEST_ENV_NUMBER`), repo setup tandem can't own;
+  a lock across sessions: tandem can't tell whether sessions in other worktrees share a database,
+  and the overlap pipelining adds is within one pair.
 - A peer agreeing is never user approval. A reply is never promised: a model can ignore a message
   that arrived fine.
 - The shared rules never touch transport details. Only the per-peer section and launcher do, so
@@ -417,7 +455,8 @@ yet (`docs/backlog/claude-navigator-bash-can-write.md`); the driver's `git statu
 - Message bodies go in as one single-quoted argument, never a heredoc, pipe or redirect: both
   harnesses' permission rules match the command text, and every part of a compound command needs
   its own rule.
-- agy runs repo commands as `cd <repo> && <command>`, otherwise in plain form (no `git -C`, no
+- agy runs repo commands as `cd <repo> && <command>` (tests excepted: `tandem test` runs in the
+  repo), otherwise in plain form (no `git -C`, no
   absolute paths), and reads files with its file tools: each off-allowlist form is a prompt.
 - The driver ends a session only after the user confirms, and puts its narrative in `decisions.md`
   and its `done` message, because `tandem done` regenerates `summary.md`.

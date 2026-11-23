@@ -57,7 +57,7 @@ class SettingsTest(LaunchTestCase):
                     "Bash(tandem log *)",
                     "Bash(tandem watch *)",
                     "Bash(tandem done *)",
-                    "Bash(dip rspec *)",
+                    "Bash(tandem test dip rspec *)",
                 ]
             },
         )
@@ -86,7 +86,7 @@ class SettingsTest(LaunchTestCase):
                 "Bash(tandem status *)",
                 "Bash(tandem log *)",
                 "Bash(tandem watch *)",
-                "Bash(dip rspec *)",
+                "Bash(tandem test dip rspec *)",
             ],
         )
         self.assertEqual(s["permissions"]["deny"], ["Edit", "Write", "NotebookEdit"])

@@ -13,5 +13,5 @@ the shell channel (Claude Code's sandbox settings, or a `PreToolUse` hook on Bas
 `tandem.cmdline.write_reason` and asks), deferred because Claude as navigator is the non-default role
 and the safety net already catches violations.
 
-Detected `dip rubocop` / `bundle exec rubocop` widen this: Claude's `Bash(dip rubocop *)` allow
-rule runs `dip rubocop -A` with no prompt, where agy's write gate asks. The hook fix covers it.
+Detected `dip rubocop` / `bundle exec rubocop` widen this: Claude's `Bash(tandem test dip rubocop *)` allow
+rule runs `tandem test dip rubocop -A` with no prompt, where agy's write gate asks. The hook fix covers it.

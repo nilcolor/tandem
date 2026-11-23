@@ -88,6 +88,14 @@ class WriteGateTest(TandemTestCase):
         self.assertEqual(self.reason("/bin/rm -f x"), "rm")
         self.assertEqual(self.reason("LC_ALL=C touch x"), "touch")
 
+    def test_tandem_test_runs_the_wrapped_command(self):
+        self.assertEqual(self.reason("tandem test rm -rf x"), "rm")
+        self.assertEqual(self.reason("tandem --session s test -- dip rubocop -a"), "rubocop -a")
+        self.assertIsNone(self.reason("tandem test dip rspec spec/a_spec.rb"))
+        self.assertEqual(cmdline.commands("tandem test go test ./..."), [("go", ["test", "./..."])])
+        self.assertEqual(cmdline.commands("tandem send --to driver test"), [("tandem", ["send", "--to", "driver", "test"])])
+        self.assertEqual(cmdline.commands("tandem test"), [])
+
     def test_wrappers(self):
         self.assertEqual(self.reason("xargs -0 rm"), "rm")
         self.assertEqual(self.reason("env -i FOO=1 mv a b"), "mv")

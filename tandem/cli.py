@@ -2,7 +2,7 @@ import argparse
 import sys
 from collections import namedtuple
 
-from tandem import TandemError, __version__, hooks, human, launch_agy, launch_claude, maildir, session, watch
+from tandem import TandemError, __version__, hooks, human, launch_agy, launch_claude, maildir, session, testrun, watch
 
 Command = namedtuple("Command", "name help configure run")
 
@@ -19,6 +19,12 @@ COMMANDS = (
         "print the next message in a role's inbox and mark it read",
         maildir.configure_recv,
         maildir.run_recv,
+    ),
+    Command(
+        "test",
+        "run a test command in the repo, waiting while the other role's tests run",
+        testrun.configure_test,
+        testrun.run_test,
     ),
     Command("watch", "wait for mail and ring the doorbell", watch.configure_watch, watch.run_watch),
     Command("log", "print the session log (messages, console input, events)", maildir.configure_log, maildir.run_log),

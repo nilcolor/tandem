@@ -52,13 +52,14 @@ def sanitize(text):
     return slug[:NAME_CAP].rstrip("-")
 
 
-def git(cwd, *args):
+def git(cwd, *args, env=None):
     try:
         result = subprocess.run(
             ["git", "-C", cwd] + list(args),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            env=env,
         )
     except FileNotFoundError:
         raise TandemError("git not found on PATH")

@@ -17,9 +17,10 @@ tandem/session.py          naming, init, resolution, session.json and its state,
                            session lock, log.jsonl, pidfiles, role claims, done/summary, harness env and
                            exec; shared helpers (now_iso, read_text, atomic writes, git, `seconds` for
                            CLI durations)
-tandem/maildir.py          envelopes, id allocation, deliver (send), pop/peek (recv), rendering, log -f,
-                           status
+tandem/maildir.py          envelopes, id allocation, deliver (send) and its --snapshot commit, pop/peek
+                           (recv), rendering, log -f, status
 tandem/watch.py            doorbell text, rung markers; watch --once (Claude) and --detach (agy)
+tandem/testrun.py          `tandem test`: a test command run in the repo under the session's test lock
 tandem/cmdline.py          sh-style lexer and the navigator write gate
 tandem/hooks.py            `tandem hook <event>`: Claude's prompt log and the four agy hooks
 tandem/protocol.py         renders templates/protocol.md for a peer and role (code-owned values such as

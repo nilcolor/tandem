@@ -65,10 +65,18 @@ def rule_safe_tests(meta):
     return [c for c in meta["test_cmds"] if "(" not in c and ")" not in c]
 
 
+def test_prefix(cmd):
+    """How the protocol has agents run test command `cmd`: through the session's test lock."""
+    return "tandem test " + cmd
+
+
 def approved_prefixes(meta, role):
-    """Command prefixes `role` runs without a prompt: its tandem commands, then the tests, once each."""
+    """Command prefixes `role` runs without a prompt: its tandem commands, then the tests, once each.
+
+    The tests are approved only as `tandem test <cmd>`: a bare run skips the test lock, so it asks.
+    """
     tandem = DRIVER_COMMANDS if role == "driver" else AGENT_COMMANDS
-    return list(dict.fromkeys(list(tandem) + rule_safe_tests(meta)))
+    return list(dict.fromkeys(list(tandem) + [test_prefix(c) for c in rule_safe_tests(meta)]))
 
 
 def first_turn(role):
@@ -126,7 +134,7 @@ def _tests(meta):
     cmds = meta["test_cmds"]
     if not cmds:
         return "none configured; find the repo's own (README, Makefile) and tell your peer which you use."
-    return _code_list(cmds)
+    return _code_list(test_prefix(c) for c in cmds)
 
 
 def _review_range(meta):

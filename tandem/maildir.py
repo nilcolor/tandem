@@ -2,7 +2,9 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 from tandem import TandemError, session
@@ -80,7 +82,9 @@ def default_type(reply_to):
     return "answer" if reply_to else "question"
 
 
-def build_envelope(sender, to, body, type=None, reply_to=None, expects_reply=None, commit=None, files=None):
+def build_envelope(
+    sender, to, body, type=None, reply_to=None, expects_reply=None, commit=None, files=None, snapshot=False
+):
     """The envelope minus `id` and `ts`, which `deliver` stamps under the lock."""
     check_role(sender, "--as")
     check_role(to, "--to")
@@ -96,6 +100,8 @@ def build_envelope(sender, to, body, type=None, reply_to=None, expects_reply=Non
     refs = {}
     if commit:
         refs["commit"] = commit
+        if snapshot:
+            refs["snapshot"] = True
     if files:
         refs["files"] = list(files)
     return {
@@ -160,6 +166,59 @@ def _resolve_commit(meta, rev):
     return sha
 
 
+def checkpoint_path(sdir):
+    """The commit the last `review_request` named: a snapshot's parent, so `git show` is one step."""
+    return os.path.join(sdir, "checkpoint")
+
+
+def _snapshot_parent(meta):
+    """The last checkpoint's commit, else HEAD; None in a repo with no commits."""
+    top = meta["repo"]
+    for rev in (session.read_text(checkpoint_path(session.session_path(meta["dir"]))), "HEAD"):
+        rev = (rev or "").strip()
+        sha = session.git(top, "rev-parse", "--verify", "--quiet", rev + "^{commit}") if rev else None
+        if sha:
+            return sha
+    return None
+
+
+def take_snapshot(meta):
+    """Freeze the working tree as a commit no ref points at; returns its short sha.
+
+    The driver keeps editing while a checkpoint is in review, so the navigator needs a fixed copy
+    even when the user allows no commits. It is built in a throwaway copy of the index, so HEAD,
+    the index, refs and the tree stay as they are; only objects are added, and git gc keeps
+    unreachable ones for two weeks by default. Untracked files are in it, ignored ones aren't.
+    """
+    top = meta["repo"]
+    real_index = session.git(top, "rev-parse", "--git-path", "index")
+    with tempfile.TemporaryDirectory(prefix="tandem-snapshot-") as tmp:
+        index = os.path.join(tmp, "index")
+        if real_index:
+            # Starting from the real index reuses its stat cache, so only changed files are hashed.
+            try:
+                shutil.copyfile(os.path.join(top, real_index), index)
+            except FileNotFoundError:
+                pass
+        # A fixed identity, because commit-tree fails where the user has none configured.
+        env = dict(os.environ, GIT_INDEX_FILE=index)
+        for who in ("AUTHOR", "COMMITTER"):
+            env["GIT_%s_NAME" % who] = "tandem"
+            env["GIT_%s_EMAIL" % who] = "tandem@localhost"
+        staged = session.git(top, "add", "-A", env=env) is not None
+        tree = session.git(top, "write-tree", env=env) if staged else None
+        if not tree:
+            raise TandemError("--snapshot: cannot stage the working tree of %s" % top)
+        parent = _snapshot_parent(meta)
+        message = "tandem snapshot (session %s)" % meta["dir"]
+        # --no-gpg-sign: commit.gpgSign applies to commit-tree too, and a signing prompt would hang.
+        args = ["commit-tree", "--no-gpg-sign", tree, "-m", message] + (["-p", parent] if parent else [])
+        sha = session.git(top, *args, env=env)
+    if not sha:
+        raise TandemError("--snapshot: cannot write a commit in %s" % top)
+    return session.git(top, "rev-parse", "--short=12", sha) or sha[:12]
+
+
 def own_role(args, what):
     role = args.as_role or os.environ.get("TANDEM_ROLE")
     if not role:
@@ -182,7 +241,13 @@ def configure_send(p):
     p.add_argument("--to", required=True, metavar="ROLE", help="recipient role: %s" % ", ".join(session.ROLES))
     p.add_argument("--type", metavar="TYPE", help="%s (default: answer with --reply-to, else question)" % ", ".join(TYPES))
     p.add_argument("--reply-to", metavar="ID", help="id of the message this answers")
-    p.add_argument("--commit", metavar="REV", help="commit the message is about (stored as a short sha)")
+    ref = p.add_mutually_exclusive_group()
+    ref.add_argument("--commit", metavar="REV", help="commit the message is about (stored as a short sha)")
+    ref.add_argument(
+        "--snapshot",
+        action="store_true",
+        help="freeze the working tree as an unreferenced commit, child of the last checkpoint, and name it",
+    )
     p.add_argument("--file", dest="files", action="append", metavar="PATH", help="file the message refers to (repeatable)")
     reply = p.add_mutually_exclusive_group()
     reply.add_argument("--expects-reply", dest="expects_reply", action="store_const", const=True)
@@ -194,17 +259,25 @@ def run_send(args):
     meta = session.resolve_args(args)
     if not session.is_active(meta):
         raise TandemError("session %s has ended" % meta["dir"])
+    body = _read_body(args)
+    if args.snapshot:
+        commit = take_snapshot(meta)
+    else:
+        commit = _resolve_commit(meta, args.commit) if args.commit else None
     envelope = build_envelope(
         sender,
         args.to,
-        _read_body(args),
+        body,
         type=args.type,
         reply_to=args.reply_to,
         expects_reply=args.expects_reply,
-        commit=_resolve_commit(meta, args.commit) if args.commit else None,
+        commit=commit,
         files=args.files,
+        snapshot=args.snapshot,
     )
     msg = deliver(meta, envelope)
+    if commit and msg["type"] == "review_request":
+        session.write_text_atomic(checkpoint_path(session.session_path(meta["dir"])), commit + "\n")
     print("sent %s to %s" % (msg["id"], msg["to"]))
     return 0
 
@@ -266,7 +339,7 @@ def _head_and_refs(msg):
     lines = []
     refs = msg.get("refs") or {}
     if refs.get("commit"):
-        lines.append("commit: %s" % refs["commit"])
+        lines.append("commit: %s%s" % (refs["commit"], " (snapshot of the working tree)" if refs.get("snapshot") else ""))
     if refs.get("files"):
         lines.append("files: %s" % ", ".join(refs["files"]))
     return head, lines

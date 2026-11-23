@@ -105,6 +105,8 @@ class PretoolPassThroughTest(AgyHookTestCase):
             "tandem log",
             "tandem send --to driver 'ok'",
             "tandem watch --as navigator --detach",
+            "tandem test go test ./...",
+            "tandem test dip rspec spec/a_spec.rb",
         ):
             self.assertEqual(self.out("agy-pretool", pretool(cmd)), ASK, cmd)
 
@@ -164,6 +166,8 @@ class PretoolWriteGateTest(AgyHookTestCase):
         self.assert_gated("tandem status > status.txt", "redirect > status.txt")
         self.assert_gated("cd %s && touch x" % self.meta["repo"], "touch")
         self.assert_gated('tandem send --to driver "see $(rm x)"', "rm")
+        self.assert_gated("tandem test dip rubocop -A", "rubocop -A")
+        self.assert_gated("tandem test -- rm -rf x", "rm")
 
     def test_other_tandem_commands(self):
         # Ungated, these would start a host-side harness (`tandem claude -- --permission-mode
@@ -177,6 +181,7 @@ class PretoolWriteGateTest(AgyHookTestCase):
             ("tandem human", "tandem human"),
             ("tandem hook agy-stop", "tandem hook"),
             ("ls; tandem done", "tandem done"),
+            ("tandem test tandem done", "tandem done"),
         ):
             self.assert_gated(cmd, sub)
         for cmd in ("tandem", "tandem --version"):

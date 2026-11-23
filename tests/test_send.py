@@ -348,3 +348,93 @@ class ConcurrentSendTest(SendTestCase):
         self.assertEqual(len({m["body"] for m in logged}), total)
         for m in logged:
             self.assertEqual(self.message(m["to"], m["id"])["body"], m["body"])
+
+
+class SnapshotTest(SendTestCase):
+    def setUp(self):
+        super().setUp()
+        self.head = self.git(self.repo, "rev-parse", "HEAD")
+
+    def write(self, name, text):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(text)
+
+    def snapshot(self, body="step"):
+        self.send_ok("--as", "driver", "--to", "navigator", "--type", "review_request", "--snapshot", body)
+        msgs = self.messages_logged()
+        return msgs[-1]["refs"]
+
+    def test_freezes_tracked_and_untracked_changes_without_touching_the_repo(self):
+        self.write("README", "changed\n")
+        self.write("new.txt", "untracked\n")
+        self.write(".gitignore", "ignored.log\n")
+        self.write("ignored.log", "noise\n")
+        self.git(self.repo, "add", ".gitignore")
+        status = self.git(self.repo, "status", "--porcelain")
+        all_refs = self.git(self.repo, "for-each-ref")
+        refs = self.snapshot()
+        self.assertEqual(refs["snapshot"], True)
+        sha = refs["commit"]
+        self.assertEqual(len(sha), 12)
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(self.git(self.repo, "status", "--porcelain"), status)
+        self.assertEqual(self.git(self.repo, "for-each-ref"), all_refs)
+        self.assertNotIn(sha, self.git(self.repo, "log", "--all", "--format=%h"))
+        self.assertEqual(self.git(self.repo, "show", sha + ":README"), "changed")
+        self.assertEqual(self.git(self.repo, "show", sha + ":new.txt"), "untracked")
+        self.assertEqual(self.git(self.repo, "rev-parse", sha + "^"), self.head)
+        files = self.git(self.repo, "ls-tree", "-r", "--name-only", sha).split()
+        self.assertNotIn("ignored.log", files)
+
+    def test_next_snapshot_is_a_child_of_the_last_checkpoint(self):
+        self.write("a.txt", "one\n")
+        first = self.snapshot("step 1")["commit"]
+        self.write("b.txt", "two\n")
+        second = self.snapshot("step 2")["commit"]
+        self.assertTrue(self.git(self.repo, "rev-parse", second + "^").startswith(first))
+        self.assertEqual(self.git(self.repo, "show", "--name-only", "--format=", second), "b.txt")
+
+    def test_a_committed_checkpoint_is_the_next_snapshot_parent(self):
+        self.write("a.txt", "one\n")
+        self.git(self.repo, "add", "a.txt")
+        self.git(self.repo, "commit", "-q", "-m", "step 1")
+        self.send_ok("--as", "driver", "--to", "navigator", "--type", "review_request", "--commit", "HEAD", "step 1")
+        step1 = self.git(self.repo, "rev-parse", "HEAD")
+        self.write("b.txt", "two\n")
+        sha = self.snapshot("step 2")["commit"]
+        self.assertEqual(self.git(self.repo, "rev-parse", sha + "^"), step1)
+
+    def test_only_review_requests_move_the_checkpoint(self):
+        self.write("a.txt", "one\n")
+        self.send_ok("--as", "driver", "--to", "navigator", "--type", "question", "--snapshot", "look")
+        self.assertFalse(os.path.exists(maildir.checkpoint_path(self.sdir)))
+        sha = self.snapshot()["commit"]
+        self.assertEqual(self.git(self.repo, "rev-parse", sha + "^"), self.head)
+
+    def test_unresolvable_checkpoint_falls_back_to_head(self):
+        with open(maildir.checkpoint_path(self.sdir), "w") as f:
+            f.write("0123456789ab\n")
+        self.write("a.txt", "one\n")
+        sha = self.snapshot()["commit"]
+        self.assertEqual(self.git(self.repo, "rev-parse", sha + "^"), self.head)
+
+    def test_signing_config_and_missing_identity_do_not_matter(self):
+        self.git(self.repo, "config", "commit.gpgSign", "true")
+        self.git(self.repo, "config", "gpg.program", "false")
+        for who in ("AUTHOR", "COMMITTER"):
+            for what in ("NAME", "EMAIL"):
+                os.environ.pop("GIT_%s_%s" % (who, what))
+        self.write("a.txt", "one\n")
+        sha = self.snapshot()["commit"]
+        self.assertEqual(self.git(self.repo, "show", "-s", "--format=%an", sha), "tandem")
+
+    def test_rendered_as_a_snapshot(self):
+        self.write("a.txt", "one\n")
+        sha = self.snapshot()["commit"]
+        code, out, err = self.run_cli("recv", "--as", "navigator")
+        self.assertEqual(code, 0, err)
+        self.assertIn("commit: %s (snapshot of the working tree)" % sha, out)
+
+    def test_commit_and_snapshot_conflict(self):
+        err = self.send_error("--as", "driver", "--to", "navigator", "--commit", "HEAD", "--snapshot", "x")
+        self.assertIn("not allowed with argument", err)

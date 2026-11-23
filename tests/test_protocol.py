@@ -169,7 +169,7 @@ class RenderTest(ProtocolTestCase):
         self.assertIn("You: navigator (agy). Peer: driver (Claude Code).", text)
         self.assertIn("Ticket: `APIX-123`.", text)
         self.assertIn("Strip the BOM from CSV uploads.", text)
-        self.assertIn("Test commands: `dip rspec`", text)
+        self.assertIn("Test commands: `tandem test dip rspec`", text)
 
     def test_role_defaults_from_session(self):
         text = protocol.render(self.meta, "claude")
@@ -188,7 +188,7 @@ class RenderTest(ProtocolTestCase):
 
     def test_several_test_commands(self):
         meta = dict(self.meta, test_cmds=["go test", "dip rspec"])
-        self.assertIn("Test commands: `go test`, `dip rspec`", protocol.render(meta, "claude"))
+        self.assertIn("Test commands: `tandem test go test`, `tandem test dip rspec`", protocol.render(meta, "claude"))
 
     def test_placeholders_in_brief_stay_literal(self):
         meta = dict(self.meta, task="Render {{doorbell}} and {{nope}} literally.")

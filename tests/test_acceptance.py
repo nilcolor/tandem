@@ -259,7 +259,7 @@ class EndToEndTest(AcceptanceTestCase):
         with open(launch_agy.profile_path(sdir)) as f:
             profile = json.load(f)
         self.assertEqual((profile["toolPermission"], profile["enableTerminalSandbox"]), ("request-review", False))
-        self.assertIn("command(go test)", profile["permissions"]["allow"])
+        self.assertIn("command(tandem test go test)", profile["permissions"]["allow"])
 
         # Launcher first prompts are not human input; what the user types is.
         self.claude_prompt(claude["argv"][-1])

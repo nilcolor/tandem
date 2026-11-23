@@ -213,7 +213,7 @@ class ProfileTest(AgyFilesTestCase):
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
-                    "allow": rules("command", NAV_TANDEM + ["go test"] + read_git(self.meta["repo"])),
+                    "allow": rules("command", NAV_TANDEM + ["tandem test go test"] + read_git(self.meta["repo"])),
                     "deny": ["write_file(*)"],
                 },
             },
@@ -230,7 +230,7 @@ class ProfileTest(AgyFilesTestCase):
                 "toolPermission": "request-review",
                 "enableTerminalSandbox": False,
                 "permissions": {
-                    "allow": rules("command", DRIVER_TANDEM + ["go test", "git"])
+                    "allow": rules("command", DRIVER_TANDEM + ["tandem test go test", "git"])
                     + rules("write_file", [os.path.join(self.sdir, n) for n in ("plan.md", "decisions.md")]),
                     "deny": [],
                 },
@@ -345,13 +345,14 @@ class TestPrefixFlowTest(AgyFilesTestCase):
     def test_exact_commands_never_the_bare_tool(self):
         for role in ROLES:
             allow = self.allow(self.meta, role)
-            self.assertIn("command(dip rspec)", allow, role)
-            self.assertIn("command(bundle exec rspec)", allow, role)
+            self.assertIn("command(tandem test dip rspec)", allow, role)
+            self.assertIn("command(tandem test bundle exec rspec)", allow, role)
+            self.assertNotIn("command(dip rspec)", allow, role)
             self.assertNotIn("command(dip)", allow, role)
             self.assertNotIn("command(bundle)", allow, role)
 
     def test_detected_prefix(self):
-        self.assertIn("command(go test)", self.allow(self.new_session("detected", None)))
+        self.assertIn("command(tandem test go test)", self.allow(self.new_session("detected", None)))
 
     def test_no_test_commands(self):
         os.remove(os.path.join(self.repo, "go.mod"))
@@ -363,4 +364,5 @@ class TestPrefixFlowTest(AgyFilesTestCase):
         meta = self.new_session("norm", ["  go   test ", "go test", "make (all)", "tandem send", "make test"])
         self.assertEqual(meta["test_cmds"], ["go test", "make (all)", "tandem send", "make test"])
         # `make (all)` would end the rule early, so it is left out.
-        self.assertEqual(self.allow(meta), rules("command", NAV_TANDEM + ["go test", "make test"] + read_git(meta["repo"])))
+        tests = ["tandem test go test", "tandem test tandem send", "tandem test make test"]
+        self.assertEqual(self.allow(meta), rules("command", NAV_TANDEM + tests + read_git(meta["repo"])))

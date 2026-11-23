@@ -9,8 +9,9 @@ A session goes like this:
 
 1. You give a task: a ticket key, a short brief, or just a first prompt to the driver.
 2. The driver writes a plan; the navigator reviews it. They agree, or escalate to you.
-3. The driver works in checkpoints; the navigator reviews each one from the diff and its own test
-   runs.
+3. The driver works in checkpoints. It goes on with the next step while the navigator reviews the
+   last one (from a frozen commit of it and its own test runs), but never gets two checkpoints
+   ahead.
 4. If the task changed code, the navigator reviews the whole change in three passes: one across
    every lens (quality, implementation, testing, simplification, documentation), one for code
    smells, and a last one for critical issues only. A task with no code change (a review, research)
@@ -90,7 +91,7 @@ tandem init [name] [--ticket KEY] [--task TEXT | --task-file FILE] [--test-cmd C
 | `--ticket KEY` | Ticket the task comes from. The driver starts intake from it. |
 | `--task TEXT` | The task brief, inline. |
 | `--task-file FILE` | The task brief, read from a file. |
-| `--test-cmd CMD` | The command that runs the tests (repeatable). Both agents may run it without asking. Default: detected from the repo: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec`, and with either Ruby marker a `.rubocop.yml` adds `dip rubocop` or `bundle exec rubocop`. Giving any `--test-cmd` replaces detection. |
+| `--test-cmd CMD` | The command that runs the tests (repeatable). Both agents run it as `tandem test <cmd>`, without asking. Default: detected from the repo: `go.mod` → `go test`, `dip.yml` → `dip rspec`, a `Gemfile` without `dip.yml` → `bundle exec rspec`, and with either Ruby marker a `.rubocop.yml` adds `dip rubocop` or `bundle exec rubocop`. Giving any `--test-cmd` replaces detection. |
 | `--replace` | End this repo's active session (without a summary) and start a new one. Run `tandem done` first if you want its summary. |
 
 - A repo (more exactly, a checkout) has one active session at a time. Separate git worktrees get
@@ -130,11 +131,12 @@ string tandem can't read gets a warning. On its first turn agy starts a small ba
 
 What agy may do without asking:
 
-- **As navigator**: the tandem commands it needs, the test commands and read-only git. Anything
+- **As navigator**: the tandem commands it needs, the test commands (through `tandem test`) and
+  read-only git. Anything
   else asks you first, and anything that looks like a write gets a prompt saying
   `tandem write gate: …`. Its file-writing tool is denied.
 - **As driver**: `accept-edits` mode (file edits don't ask), plus the tandem commands, the test
-  commands and git. Other commands ask.
+  commands (through `tandem test`) and git. Other commands ask.
 
 ### `tandem human`: talk to the pair
 
@@ -170,7 +172,8 @@ You rarely type these; the agents do, and their permissions allow them without p
 
 | Command | Does |
 |---|---|
-| `tandem send --to ROLE [--type T] [--reply-to ID] [--commit REV] [--file PATH]... [body]` | Send a message to `driver`, `navigator` or `human`. The body is the argument or stdin. `--type` defaults to `answer` with `--reply-to`, else `question`. `--expects-reply`/`--no-reply` override the default for the type. |
+| `tandem send --to ROLE [--type T] [--reply-to ID] [--commit REV \| --snapshot] [--file PATH]... [body]` | Send a message to `driver`, `navigator` or `human`. The body is the argument or stdin. `--type` defaults to `answer` with `--reply-to`, else `question`. `--expects-reply`/`--no-reply` override the default for the type. `--snapshot` freezes the working tree (untracked files too, ignored ones not) as a commit whose parent is the last checkpoint, and names it; HEAD, the index, branches and refs don't change. |
+| `tandem test <command> [args]` | Run a test command in the repo, after any test run of the other agent's finishes (both may share a database). Prints whose run it is waiting for, and exits with the command's code. |
 | `tandem recv [--peek] [--wait] [--timeout S] [--json]` | Print the oldest unread message and mark it read. Exits 3 when there's none (or on timeout). |
 | `tandem watch --once [--deadline S]` / `--detach` | The doorbell watchers (Claude's and agy's); started by the launchers' hooks and by agy itself. |
 
@@ -193,7 +196,8 @@ Exit codes: 0 ok, 1 error, 2 mail (`watch --once`), 3 no mail or timeout (`recv`
 - **Navigator**: reads, reviews, runs the tests, never edits. This is enforced by permissions, not
   by asking nicely: Claude as navigator has no edit tools, and agy as navigator can't use its file
   tool and gets a prompt for any shell command that looks like a write.
-- Either agent may run the tandem commands and the test commands without asking. Other commands
+- Either agent may run the tandem commands and the test commands (as `tandem test <cmd>`, which
+  keeps the two agents' test runs from overlapping) without asking. Other commands
   follow each harness's own rules, so expect occasional prompts for read-only commands that aren't
   on the allowlist (`make help`, `go vet`, a long `grep`). Answer them once with "yes"; avoid the
   "always allow … (persist to settings.json)" options, which change your global config.
@@ -235,6 +239,10 @@ For example, `instructions/driver.md` with "Before the final review, run `dip ru
   by itself when agy exits, and the next agy launch starts a new one.
 - **Flipping roles mid-task**: quit both, then `tandem agy --role driver` and
   `tandem claude --role navigator`.
+- **"waiting for the test lock"** in a test run: the other agent's tests are running, and this run
+  starts when they finish. If it waits on a run that hangs, stop that run in the other console.
+- **Snapshots are dangling commits.** `--snapshot` adds objects to the repo but no ref, so nothing
+  shows in `git log` or `git status`; `git gc` drops them after two weeks by default.
 - The agents' messages sometimes show a `tandem recv` as "failed" in agy: that's exit code 3, "no
   mail", and expected.
 
@@ -249,6 +257,8 @@ show the path):
 | `peers/<claude\|agy>/hooks.log` | one line per hook failure; empty is good |
 | `peers/<role>/watch.log` | agy's watcher: start, which agy process it serves, each ring, failures, why it exited |
 | `peers/<role>/watch.pid` | the running watcher's pid |
+| `test.holder` | the test run holding the test lock (role, command, pid, start); gone when none runs |
+| `checkpoint` | the commit the last `review_request` named, the parent of the next `--snapshot` |
 | `summary.md` | written by `tandem done` |
 
 - **agy doesn't wake on mail**: `tandem status` shows whether its watcher is running. If not, tell
